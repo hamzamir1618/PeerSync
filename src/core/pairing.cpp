@@ -1,8 +1,11 @@
 #include <peersync/pairing.h>
+#include <peersync/protocol.h>
 #include <random>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <set>
+#include <mutex>
 
 namespace peersync {
 namespace pairing {
@@ -211,6 +214,193 @@ std::vector<uint8_t> deriveSessionKey(const std::string& pin,
     return pbkdf2HmacSha256(reinterpret_cast<const uint8_t*>(pin.data()), pin.size(),
                             reinterpret_cast<const uint8_t*>(salt.data()), salt.size(),
                             iterations, keyLength);
+}
+
+namespace {
+// Lightweight mitigation against basic replay attacks: track recently seen nonces
+// across pairing attempts. This is not a full replay-protection framework (which
+// would require persistent storage and timestamps), but prevents identical nonce
+// reuse within active application lifecycles.
+static std::mutex g_seenNoncesMutex;
+static std::set<std::vector<uint8_t>> g_seenNonces;
+} // anonymous namespace
+
+PairingSession::PairingSession(PairingRole role, const std::string& pin)
+    : role_(role), state_(PairingState::Initial), pin_(pin) {
+}
+
+void PairingSession::start() {
+    if (role_ != PairingRole::Initiator) {
+        fail("start() can only be called on an Initiator session");
+        return;
+    }
+    if (state_ != PairingState::Initial) {
+        return;
+    }
+
+    currentNonce_.resize(32);
+    static thread_local std::random_device rd;
+    static thread_local std::mt19937 gen(rd());
+    std::uniform_int_distribution<unsigned int> dist(0, 255);
+    for (size_t i = 0; i < 32; ++i) {
+        currentNonce_[i] = static_cast<uint8_t>(dist(gen));
+    }
+
+    sessionKey_ = deriveSessionKey(pin_, std::string(currentNonce_.begin(), currentNonce_.end()));
+
+    PairChallengeMessage chal;
+    chal.challengeBytes = currentNonce_;
+    outgoingQueue_.push_back(serializeMessage(chal));
+
+    state_ = PairingState::WaitingForResponse;
+}
+
+void PairingSession::processMessage(const std::vector<uint8_t>& serializedMessage) {
+    if (serializedMessage.empty()) {
+        fail("Received empty serialized message");
+        return;
+    }
+
+    MessageType type = static_cast<MessageType>(serializedMessage[0]);
+
+    if (role_ == PairingRole::Initiator && state_ == PairingState::WaitingForResponse) {
+        if (type == MessageType::PairResult) {
+            auto res = deserializePairResultMessage(serializedMessage);
+            fail("Remote responder reported failure: " + res.errorMessage);
+            return;
+        }
+        if (type == MessageType::ErrorMessage) {
+            auto err = deserializeErrorMessageMessage(serializedMessage);
+            fail("Remote error: " + err.errorMessage);
+            return;
+        }
+        if (type != MessageType::PairResponse) {
+            fail("Expected PairResponse, received message type " + std::to_string(static_cast<int>(type)));
+            return;
+        }
+
+        auto resp = deserializePairResponseMessage(serializedMessage);
+        auto expectedHmac = hmacSha256(sessionKey_, currentNonce_);
+
+        if (resp.responseBytes == expectedHmac) {
+            state_ = PairingState::Authenticated;
+            PairResultMessage res;
+            res.success = true;
+            res.errorMessage = "";
+            outgoingQueue_.push_back(serializeMessage(res));
+        } else {
+            fail("PIN verification failed: HMAC mismatch");
+            PairResultMessage res;
+            res.success = false;
+            res.errorMessage = "PIN verification failed: HMAC mismatch";
+            outgoingQueue_.push_back(serializeMessage(res));
+        }
+        return;
+    }
+
+    if (role_ == PairingRole::Responder && state_ == PairingState::Initial) {
+        if (type != MessageType::PairChallenge) {
+            fail("Expected PairChallenge, received message type " + std::to_string(static_cast<int>(type)));
+            return;
+        }
+
+        auto chal = deserializePairChallengeMessage(serializedMessage);
+        currentNonce_ = chal.challengeBytes;
+
+        {
+            std::lock_guard<std::mutex> lock(g_seenNoncesMutex);
+            if (g_seenNonces.count(currentNonce_) > 0) {
+                fail("Replayed challenge nonce rejected");
+                PairResultMessage res;
+                res.success = false;
+                res.errorMessage = "Replayed challenge nonce rejected";
+                outgoingQueue_.push_back(serializeMessage(res));
+                return;
+            }
+            if (g_seenNonces.size() > 1000) {
+                g_seenNonces.clear();
+            }
+            g_seenNonces.insert(currentNonce_);
+        }
+
+        sessionKey_ = deriveSessionKey(pin_, std::string(currentNonce_.begin(), currentNonce_.end()));
+        auto hmac = hmacSha256(sessionKey_, currentNonce_);
+
+        PairResponseMessage resp;
+        resp.responseBytes = hmac;
+        outgoingQueue_.push_back(serializeMessage(resp));
+
+        state_ = PairingState::WaitingForResult;
+        return;
+    }
+
+    if (role_ == PairingRole::Responder && state_ == PairingState::WaitingForResult) {
+        if (type != MessageType::PairResult) {
+            fail("Expected PairResult, received message type " + std::to_string(static_cast<int>(type)));
+            return;
+        }
+
+        auto res = deserializePairResultMessage(serializedMessage);
+        if (res.success) {
+            state_ = PairingState::Authenticated;
+        } else {
+            fail("Initiator reported pairing failure: " + res.errorMessage);
+        }
+        return;
+    }
+
+    fail("Invalid message type or state transition in PairingSession");
+}
+
+bool PairingSession::hasOutgoingMessage() const {
+    return !outgoingQueue_.empty();
+}
+
+std::vector<uint8_t> PairingSession::popOutgoingMessage() {
+    if (outgoingQueue_.empty()) {
+        return {};
+    }
+    auto msg = outgoingQueue_.front();
+    outgoingQueue_.erase(outgoingQueue_.begin());
+    return msg;
+}
+
+PairingState PairingSession::getState() const {
+    return state_;
+}
+
+bool PairingSession::isAuthenticated() const {
+    return state_ == PairingState::Authenticated;
+}
+
+bool PairingSession::isFinished() const {
+    return state_ == PairingState::Authenticated || state_ == PairingState::Failed;
+}
+
+bool PairingSession::isFailed() const {
+    return state_ == PairingState::Failed;
+}
+
+std::vector<uint8_t> PairingSession::getSessionKey() const {
+    if (state_ == PairingState::Authenticated) {
+        return sessionKey_;
+    }
+    return {};
+}
+
+std::string PairingSession::getErrorMessage() const {
+    return errorMessage_;
+}
+
+void PairingSession::fail(const std::string& reason) {
+    state_ = PairingState::Failed;
+    errorMessage_ = reason;
+    sessionKey_.clear();
+}
+
+void PairingSession::clearSeenNonces() {
+    std::lock_guard<std::mutex> lock(g_seenNoncesMutex);
+    g_seenNonces.clear();
 }
 
 } // namespace pairing

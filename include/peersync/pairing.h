@@ -35,11 +35,67 @@ std::vector<uint8_t> pbkdf2HmacSha256(const uint8_t* pass, size_t passLen,
                                       size_t iterations,
                                       size_t keyLength);
 
+enum class PairingRole {
+    Initiator,
+    Responder
+};
+
+enum class PairingState {
+    Initial,
+    WaitingForResponse,
+    WaitingForResult,
+    Authenticated,
+    Failed
+};
+
+class PairingSession {
+public:
+    PairingSession(PairingRole role, const std::string& pin);
+    ~PairingSession() = default;
+
+    // Initiator starts by generating a random challenge nonce and enqueuing PairChallengeMessage.
+    void start();
+
+    // Feeds an incoming serialized message into the state machine, advancing state and generating responses.
+    void processMessage(const std::vector<uint8_t>& serializedMessage);
+
+    // Outgoing serialized message queue for transport over pipes/sockets.
+    bool hasOutgoingMessage() const;
+    std::vector<uint8_t> popOutgoingMessage();
+
+    // State query methods
+    PairingState getState() const;
+    bool isAuthenticated() const;
+    bool isFinished() const;
+    bool isFailed() const;
+
+    // Returns derived session key if isAuthenticated() == true, otherwise returns empty vector.
+    std::vector<uint8_t> getSessionKey() const;
+    std::string getErrorMessage() const;
+
+    // Helper for testing replay protection across independent test runs
+    static void clearSeenNonces();
+
+private:
+    PairingRole role_;
+    PairingState state_;
+    std::string pin_;
+    std::vector<uint8_t> sessionKey_;
+    std::vector<uint8_t> currentNonce_;
+    std::string errorMessage_;
+    std::vector<std::vector<uint8_t>> outgoingQueue_;
+
+    void fail(const std::string& reason);
+};
+
 } // namespace pairing
 
-// Make primary pairing functions available directly in peersync namespace
+// Make primary pairing functions and classes available directly in peersync namespace
 using pairing::generatePin;
 using pairing::deriveSessionKey;
+using pairing::PairingRole;
+using pairing::PairingState;
+using pairing::PairingSession;
 
 } // namespace peersync
 

@@ -106,3 +106,100 @@ TEST(PairingTest, Pbkdf2HmacSha256KnownVectors) {
         2, 32);
     EXPECT_EQ(toHex(res2), "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43");
 }
+
+TEST(PairingTest, HandshakeSuccessMatchingPins) {
+    peersync::PairingSession::clearSeenNonces();
+
+    peersync::PairingSession initiator(peersync::PairingRole::Initiator, "123456");
+    peersync::PairingSession responder(peersync::PairingRole::Responder, "123456");
+
+    initiator.start();
+    ASSERT_TRUE(initiator.hasOutgoingMessage());
+
+    // Step 1: Initiator -> Responder (PairChallenge)
+    auto challengeMsg = initiator.popOutgoingMessage();
+    responder.processMessage(challengeMsg);
+    ASSERT_TRUE(responder.hasOutgoingMessage());
+    EXPECT_EQ(responder.getState(), peersync::PairingState::WaitingForResult);
+
+    // Step 2: Responder -> Initiator (PairResponse)
+    auto responseMsg = responder.popOutgoingMessage();
+    initiator.processMessage(responseMsg);
+    ASSERT_TRUE(initiator.hasOutgoingMessage());
+    EXPECT_EQ(initiator.getState(), peersync::PairingState::Authenticated);
+
+    // Step 3: Initiator -> Responder (PairResult)
+    auto resultMsg = initiator.popOutgoingMessage();
+    responder.processMessage(resultMsg);
+    EXPECT_EQ(responder.getState(), peersync::PairingState::Authenticated);
+
+    EXPECT_TRUE(initiator.isAuthenticated());
+    EXPECT_TRUE(responder.isAuthenticated());
+    EXPECT_FALSE(initiator.getSessionKey().empty());
+    EXPECT_FALSE(responder.getSessionKey().empty());
+    EXPECT_EQ(initiator.getSessionKey(), responder.getSessionKey())
+        << "Both sides must derive identical session keys upon successful handshake";
+}
+
+TEST(PairingTest, HandshakeFailureWrongPin) {
+    peersync::PairingSession::clearSeenNonces();
+
+    peersync::PairingSession initiator(peersync::PairingRole::Initiator, "123456");
+    peersync::PairingSession responder(peersync::PairingRole::Responder, "999999"); // Wrong PIN
+
+    initiator.start();
+    ASSERT_TRUE(initiator.hasOutgoingMessage());
+
+    // Step 1: Initiator -> Responder (PairChallenge)
+    auto challengeMsg = initiator.popOutgoingMessage();
+    responder.processMessage(challengeMsg);
+    ASSERT_TRUE(responder.hasOutgoingMessage());
+
+    // Step 2: Responder -> Initiator (PairResponse with wrong HMAC)
+    auto responseMsg = responder.popOutgoingMessage();
+    initiator.processMessage(responseMsg);
+    ASSERT_TRUE(initiator.hasOutgoingMessage());
+    EXPECT_EQ(initiator.getState(), peersync::PairingState::Failed);
+
+    // Step 3: Initiator -> Responder (PairResult reporting failure)
+    auto resultMsg = initiator.popOutgoingMessage();
+    responder.processMessage(resultMsg);
+    EXPECT_EQ(responder.getState(), peersync::PairingState::Failed);
+
+    EXPECT_FALSE(initiator.isAuthenticated());
+    EXPECT_FALSE(responder.isAuthenticated());
+    EXPECT_TRUE(initiator.isFailed());
+    EXPECT_TRUE(responder.isFailed());
+    EXPECT_TRUE(initiator.getSessionKey().empty())
+        << "No session key must be exposed upon failed handshake";
+    EXPECT_TRUE(responder.getSessionKey().empty())
+        << "No session key must be exposed upon failed handshake";
+}
+
+TEST(PairingTest, HandshakeReplayedNonceRejected) {
+    peersync::PairingSession::clearSeenNonces();
+
+    peersync::PairingSession initiator(peersync::PairingRole::Initiator, "456789");
+    peersync::PairingSession responder1(peersync::PairingRole::Responder, "456789");
+
+    initiator.start();
+    ASSERT_TRUE(initiator.hasOutgoingMessage());
+
+    // Step 1: First session exchange with challengeMsg
+    auto challengeMsg = initiator.popOutgoingMessage();
+    responder1.processMessage(challengeMsg);
+    EXPECT_EQ(responder1.getState(), peersync::PairingState::WaitingForResult);
+
+    // Step 2: Attempt replay attack against a second responder instance with identical challengeMsg
+    // Lightweight mitigation against basic replay attacks: track recently seen nonces
+    // across pairing attempts. This is not a full replay-protection framework (which
+    // would require persistent storage and timestamps), but prevents identical nonce
+    // reuse within active application lifecycles.
+    peersync::PairingSession responder2(peersync::PairingRole::Responder, "456789");
+    responder2.processMessage(challengeMsg);
+
+    EXPECT_EQ(responder2.getState(), peersync::PairingState::Failed);
+    EXPECT_TRUE(responder2.getSessionKey().empty());
+    EXPECT_NE(responder2.getErrorMessage().find("Replayed challenge nonce rejected"), std::string::npos);
+}
+
