@@ -9,12 +9,22 @@ peersync finds another instance of itself on the local network automatically, tr
 
 ## Features
 
-- [x] Automatic local network peer discovery (mDNS / UDP broadcast)
+- [x] Automatic local network peer discovery (mDNS / DNS-SD)
+- [x] PIN-based pairing before first sync
 - [ ] Direct peer-to-peer file transfer without internet connection
 - [ ] Resumable transfers for interrupted downloads and uploads
 - [ ] Delta synchronization (transfers only changed file parts)
 - [ ] Command-line interface (CLI)
 - [ ] Graphical user interface (GUI)
+
+## How Pairing Works
+
+Before any file transfer or directory synchronization can occur between two discovered devices, **peersync** requires a one-time PIN-based authorization handshake:
+
+1. **PIN Generation & Display**: The device listening for incoming sync requests generates a random 6-digit numeric PIN (e.g., `042918`) and displays it on screen.
+2. **Out-of-Band Entry**: The user on the initiating device is prompted to enter the displayed PIN into their CLI or GUI prompt.
+3. **Cryptographic Handshake**: Both peers independently derive a session key via PBKDF2-HMAC-SHA256 and perform an HMAC challenge-response handshake (`PairChallenge` -> `PairResponse` -> `PairResult`). The PIN itself is never transmitted over the wire.
+
 
 ## Dependencies
 

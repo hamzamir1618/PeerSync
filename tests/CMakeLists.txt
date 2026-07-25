@@ -10,7 +10,7 @@ FetchContent_MakeAvailable(googletest)
 
 include(CTest)
 
-add_executable(peersync_tests test_placeholder.cpp test_socket.cpp test_message_framing.cpp test_protocol.cpp test_discovery.cpp test_pairing.cpp)
+add_executable(peersync_tests test_placeholder.cpp test_socket.cpp test_message_framing.cpp test_protocol.cpp test_discovery.cpp test_pairing.cpp test_pairing_integration.cpp)
 target_link_libraries(peersync_tests PRIVATE peersync_core GTest::gtest_main)
 
 include(GoogleTest)
