@@ -193,6 +193,11 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
     std::vector<DeltaInstruction> currentBatch;
     uint64_t blockDataSeq = 1; // Sequence 1-indexed for BlockData references
     uint64_t instIndex = 0;
+    uint64_t fileBytesProcessed = 0;
+
+    if (m_config.progressCallback) {
+        m_config.progressCallback(m_bytesSent, 0, fileSize);
+    }
 
     auto sendCurrentBatch = [&]() {
         DeltaInstructionsMessage deltaMsg{relativePath, fileSize, static_cast<uint32_t>(m_config.blockSize), currentBatch};
@@ -206,22 +211,31 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
         }
         auto ackMsg = deserializeTransferAckMessage(ackPayload);
         (void)ackMsg; // ACK confirmed by receiver
+        if (m_config.progressCallback) {
+            m_config.progressCallback(m_bytesSent, std::min(fileBytesProcessed, fileSize), fileSize);
+        }
     };
 
     for (const auto& inst : delta) {
+        uint64_t instLen = (inst.type == DeltaInstructionType::Literal) ? inst.bytes.size() : m_config.blockSize;
         if (instIndex < resumeOffset) {
             if (inst.type == DeltaInstructionType::Literal && inst.bytes.size() > m_config.literalThreshold) {
                 blockDataSeq++;
             }
             instIndex++;
+            fileBytesProcessed += instLen;
             continue;
         }
         instIndex++;
+        fileBytesProcessed += instLen;
 
         if (inst.type == DeltaInstructionType::Literal && inst.bytes.size() > m_config.literalThreshold) {
             // Send BlockData message first
             BlockDataMessage blockMsg{relativePath, blockDataSeq, inst.bytes};
             sendMsg(serializeMessage(blockMsg));
+            if (m_config.progressCallback) {
+                m_config.progressCallback(m_bytesSent, std::min(fileBytesProcessed, fileSize), fileSize);
+            }
 
             // Reference this block in the instruction batch with empty bytes and blockIndex = blockDataSeq
             DeltaInstruction refInst;
@@ -257,6 +271,9 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
     // 6. Send final TransferComplete success acknowledgment
     TransferCompleteMessage successAck{relativePath, true, expectedHash};
     sendMsg(serializeMessage(successAck));
+    if (m_config.progressCallback) {
+        m_config.progressCallback(m_bytesSent, fileSize, fileSize);
+    }
 
     m_finalHash = expectedHash;
     return true;

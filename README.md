@@ -71,6 +71,33 @@ desktop-workstation             192.168.1.102       48192
 --------------------------------------------------------------
 ```
 
+### 3. Send & Receive Files (`send` and `receive`)
+Transfer files directly across the local network with interactive PIN pairing, live progress reporting, and rolling-checksum delta synchronization. Demonstrating bandwidth savings is a core feature of `peersync`: when transferring a modified version of an existing file, only changed blocks are transmitted over the wire.
+
+#### Side-by-Side Terminal Demonstration
+
+**Terminal 1: Responding Receiver (`peersync receive`)**
+```bash
+$ peersync receive --port 54321 --accept-dir ./downloads
+Listening for incoming file transfer on port 54321...
+Enter PIN: 042918
+Pairing successful! Receiving file into './downloads'...
+Transfer completed successfully! Saved file hash: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+```
+
+**Terminal 2: Initiating Sender (`peersync send`)**
+```bash
+$ peersync send backup.tar --to my-laptop
+Looking up peer 'my-laptop' via mDNS...
+Connecting to 192.168.1.50:54321...
+Enter this PIN on the receiving device: 042918
+Pairing successful! Starting transfer of 'backup.tar'...
+Progress: 2.1 MB sent (100% complete)   
+Sent 2.1 MB of 500.0 MB file (99.6% saved via delta sync)
+```
+
+If a deliberately wrong PIN is entered on the receiving side, cryptographic pairing fails cleanly with an explicit error message on both devices, and no file data is ever transmitted or partially written to disk.
+
 
 ## Dependencies
 

@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <functional>
 
 namespace peersync {
 
@@ -17,6 +18,7 @@ public:
         size_t blockSize = 1024;                // Block size for delta signatures and chunking
         size_t literalThreshold = 1024;         // Send literal bytes > threshold as BlockData messages
         size_t maxInstructionsPerMessage = 500; // Max instructions in a single DeltaInstructions message
+        std::function<void(uint64_t bytesSent, uint64_t fileBytesProcessed, uint64_t totalFileSize)> progressCallback = nullptr;
     };
 
     explicit TransferSession(TcpSocket& socket);

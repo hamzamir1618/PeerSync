@@ -16,10 +16,10 @@ target_compile_definitions(peersync_tests PRIVATE PEERSYNC_CLI_PATH="$<TARGET_FI
 
 include(GoogleTest)
 gtest_discover_tests(peersync_tests
-    TEST_FILTER "CliIntegrationTest.*"
+    TEST_FILTER "CliIntegrationTest.DiscoverFindsListeningAdvertiser"
     PROPERTIES LABELS "requires_multicast"
 )
 gtest_discover_tests(peersync_tests
-    TEST_FILTER "-CliIntegrationTest.*"
+    TEST_FILTER "-CliIntegrationTest.DiscoverFindsListeningAdvertiser"
     PROPERTIES LABELS "unit"
 )
