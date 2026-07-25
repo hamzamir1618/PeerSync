@@ -15,6 +15,12 @@ public:
         : std::runtime_error(action + " failed [error " + std::to_string(errCode) + "]: " + errMessage) {}
 };
 
+class PeerSyncProtocolException : public std::runtime_error {
+public:
+    explicit PeerSyncProtocolException(const std::string& message)
+        : std::runtime_error(message) {}
+};
+
 } // namespace peersync
 
 #endif // PEERSYNC_EXCEPTIONS_H
