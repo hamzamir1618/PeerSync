@@ -63,3 +63,7 @@ dist/
 *.vcproj
 *.vcxproj
 *.vcxproj.filters
+
+# Error logs and reports
+*-errors.md
+*error*.md
