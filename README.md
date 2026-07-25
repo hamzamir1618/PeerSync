@@ -11,9 +11,9 @@ peersync finds another instance of itself on the local network automatically, tr
 
 - [x] Automatic local network peer discovery (mDNS / DNS-SD)
 - [x] PIN-based pairing before first sync
-- [ ] Direct peer-to-peer file transfer without internet connection
-- [ ] Resumable transfers for interrupted downloads and uploads
-- [ ] Delta synchronization (transfers only changed file parts)
+- [x] Direct peer-to-peer file transfer without internet connection
+- [x] Resumable transfers for interrupted downloads and uploads
+- [x] Delta synchronization (transfers only changed file parts)
 - [ ] Command-line interface (CLI)
 - [ ] Graphical user interface (GUI)
 

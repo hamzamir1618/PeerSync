@@ -141,3 +141,24 @@ The default block size in **peersync** is configurable (typically **64 KB** for 
   - **Pros**: Extremely compact signature lists, minimal memory usage, and very high scanning throughput (fewer blocks to index and match).
   - **Cons**: Coarser granularity. A single byte edit forces retransmission of up to an entire `blockSize` literal buffer if no other block boundaries align.
 
+## Resumable Transfers
+
+When synchronizing large files over unreliable network connections, network drops or socket disconnections midway through a transfer can result in significant wasted bandwidth if the synchronization must start over from scratch. **peersync** solves this by implementing a persistent, state-aware resumption protocol in `libpeersync` (`src/core/transfer.cpp`).
+
+### 1. Journaling Infrastructure & Deterministic Temporary Files
+During file reception (`receiveFile`), incoming delta instructions (`Copy` and `Literal`) are applied incrementally to a deterministic temporary file (`<targetFile>.peersync-tmp`). Alongside this temporary file, the receiver maintains an on-disk progress journal (`<targetFile>.peersync-journal`) recording critical transfer metadata:
+- **Relative Path**: The target repository file path.
+- **Expected File Size**: The total expected size of the reconstructed target file in bytes.
+- **Signature List Hash**: A cryptographic SHA-256 digest of the block signature list (`sigs`) computed over the receiver's initial local file before transfer began.
+- **Last Sequence Number**: The cumulative count of delta instructions successfully applied and written to disk so far (`lastSeq`).
+
+If a TCP socket connection closes or throws an exception mid-transfer, an RAII cleanup guard (`TempFileGuard`) checks whether the transfer finished successfully. On an interrupted or aborted transfer, the guard deliberately leaves both `.peersync-tmp` and `.peersync-journal` intact on disk rather than deleting them.
+
+### 2. The Resumption Handshake (`ResumeRequest` & `ResumeResponse`)
+When a new sync attempt begins for a given file path, `receiveFile` inspects the destination directory for an existing valid journal and temporary file:
+1. **Validation & Stale Fallback**: The receiver loads `.peersync-journal` and verifies that the recorded relative path matches, the temporary file size is within bounds, and the stored signature hash (`sigHash`) matches the signature list of the current local destination file. If any check fails (e.g., the local destination file was modified out-of-band while disconnected), the journal and temporary file are considered stale and are immediately deleted (`deleteJournalAndTemp`), falling back seamlessly to a clean fresh sync.
+2. **Resume Inquiry**: If the journal is valid, the receiver transmits a `ResumeRequestMessage` (MessageType 10) instead of a standard `ManifestResponseMessage`. This message includes the recorded sequence offset (`lastOffset`), expected file size, and the original block signature vector (`signatures`).
+3. **Sender-Side Skipping**: The sender (`sendFile`) receives the `ResumeRequestMessage`, validates that the file size matches its source file, and responds with a positive `ResumeResponseMessage` (`canResume = true`). It then computes the delta instructions against the receiver's provided signatures and iterates through the instruction list, fast-forwarding and skipping the first `lastOffset` instructions without reading local disk blocks or transmitting payload over the wire.
+4. **Resumption & Commit**: The sender resumes transmitting messages from instruction `lastOffset + 1`. The receiver opens `.peersync-tmp` in append/modify mode (`std::ios::ate | std::ios::in | std::ios::out`) and continues applying incoming instructions from its exact previous point of interruption. Once all bytes are received and verified against the expected file hash, `.peersync-tmp` is atomically renamed over `<targetFile>` and `.peersync-journal` is deleted.
+
+

@@ -375,6 +375,12 @@ std::vector<uint8_t> serializeMessage(const ResumeRequestMessage& msg) {
     writeString(buf, msg.relativePath);
     writeString(buf, msg.fileHash);
     writeU64(buf, msg.lastOffset);
+    writeU32(buf, static_cast<uint32_t>(msg.signatures.size()));
+    for (const auto& sig : msg.signatures) {
+        writeU32(buf, sig.weakChecksum);
+        writeU64(buf, sig.strongHash);
+        writeU64(buf, sig.blockIndex);
+    }
     return buf;
 }
 
@@ -385,6 +391,15 @@ ResumeRequestMessage deserializeResumeRequestMessage(const std::vector<uint8_t>&
     msg.relativePath = reader.readString();
     msg.fileHash = reader.readString();
     msg.lastOffset = reader.readU64();
+    uint32_t sigCount = reader.readU32();
+    msg.signatures.reserve(sigCount);
+    for (uint32_t i = 0; i < sigCount; ++i) {
+        BlockSignature sig;
+        sig.weakChecksum = reader.readU32();
+        sig.strongHash = reader.readU64();
+        sig.blockIndex = reader.readU64();
+        msg.signatures.push_back(sig);
+    }
     reader.expectEOF();
     return msg;
 }

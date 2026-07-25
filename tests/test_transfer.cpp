@@ -2,6 +2,7 @@
 #include <peersync/transfer.h>
 #include <peersync/socket.h>
 #include <peersync/exceptions.h>
+#include <peersync/message_framing.h>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -270,4 +271,182 @@ TEST_F(TransferTest, SyncEmptyFile) {
     std::filesystem::path targetFile = receiverDir / "empty.dat";
     ASSERT_TRUE(std::filesystem::exists(targetFile));
     EXPECT_EQ(std::filesystem::file_size(targetFile), 0u);
+}
+
+TEST_F(TransferTest, ResumableSyncAfterInterruption) {
+    std::filesystem::path targetFile = receiverDir / "resume.dat";
+    createTestFile(targetFile, 15000, 42); // Initial file on receiver
+
+    auto senderBytes = readFileBytes(targetFile);
+    for (size_t i = 32; i < senderBytes.size(); i += 128) {
+        senderBytes[i] ^= 0xFF; // Modify periodic bytes to create alternating Copy and Literal instructions
+    }
+    std::filesystem::path senderFile = senderDir / "sender_resume.dat";
+    {
+        std::ofstream ofs(senderFile, std::ios::binary);
+        ofs.write(reinterpret_cast<const char*>(senderBytes.data()), static_cast<std::streamsize>(senderBytes.size()));
+    }
+    auto contentBytes = readFileBytes(senderFile);
+
+    peersync::TcpSocket server = peersync::TcpSocket::listen(0, "127.0.0.1");
+    uint16_t port = server.getBoundPort();
+
+    peersync::TcpSocket acceptedSocket;
+    std::thread acceptThread([&]() {
+        acceptedSocket = server.accept();
+    });
+    peersync::TcpSocket client = peersync::TcpSocket::connect("127.0.0.1", port);
+    if (acceptThread.joinable()) {
+        acceptThread.join();
+    }
+
+    peersync::TransferSession::Config config;
+    config.blockSize = 64;
+    config.maxInstructionsPerMessage = 10;
+    config.literalThreshold = 10000; // Keep literals inlined for this test
+
+    bool caughtException = false;
+    std::thread receiverThread([&]() {
+        try {
+            peersync::TransferSession session(acceptedSocket, config);
+            session.receiveFile(receiverDir);
+        } catch (const std::exception&) {
+            caughtException = true;
+        }
+    });
+
+    // Manually act as sender for just 1 batch of 10 instructions
+    {
+        peersync::ManifestRequestMessage reqMsg{"resume.dat"};
+        peersync::sendFramedMessage(client, peersync::serializeMessage(reqMsg));
+
+        auto respPayload = peersync::recvFramedMessage(client);
+        auto respMsg = peersync::deserializeManifestResponseMessage(respPayload);
+
+        auto delta = peersync::computeDelta(senderFile, respMsg.signatures, config.blockSize);
+        ASSERT_GT(delta.size(), 15u);
+
+        std::vector<peersync::DeltaInstruction> firstBatch(delta.begin(), delta.begin() + 10);
+        peersync::DeltaInstructionsMessage deltaMsg{"resume.dat", static_cast<uint64_t>(contentBytes.size()), static_cast<uint32_t>(config.blockSize), firstBatch};
+        peersync::sendFramedMessage(client, peersync::serializeMessage(deltaMsg));
+
+        auto ackPayload = peersync::recvFramedMessage(client);
+        EXPECT_EQ(peersync::getMessageType(ackPayload), peersync::MessageType::TransferAck);
+
+        // Close client socket to simulate disconnection mid-transfer
+        client.close();
+    }
+
+    if (receiverThread.joinable()) {
+        receiverThread.join();
+    }
+    EXPECT_TRUE(caughtException);
+
+    std::filesystem::path tempPath = receiverDir / "resume.dat.peersync-tmp";
+    std::filesystem::path journalPath = receiverDir / "resume.dat.peersync-journal";
+    EXPECT_TRUE(std::filesystem::exists(tempPath));
+    EXPECT_TRUE(std::filesystem::exists(journalPath));
+    EXPECT_GT(std::filesystem::file_size(tempPath), 0u);
+
+    // Part 2: Reconnect and resume the transfer
+    peersync::TcpSocket server2 = peersync::TcpSocket::listen(0, "127.0.0.1");
+    uint16_t port2 = server2.getBoundPort();
+
+    peersync::TcpSocket acceptedSocket2;
+    std::thread acceptThread2([&]() {
+        acceptedSocket2 = server2.accept();
+    });
+    peersync::TcpSocket client2 = peersync::TcpSocket::connect("127.0.0.1", port2);
+    if (acceptThread2.joinable()) {
+        acceptThread2.join();
+    }
+
+    bool receiverSuccess = false;
+    std::thread receiverThread2([&]() {
+        try {
+            peersync::TransferSession session(acceptedSocket2, config);
+            receiverSuccess = session.receiveFile(receiverDir);
+        } catch (...) {
+            receiverSuccess = false;
+        }
+    });
+
+    peersync::TransferSession senderSession(client2, config);
+    bool senderSuccess = senderSession.sendFile(senderFile, "resume.dat");
+
+    if (receiverThread2.joinable()) {
+        receiverThread2.join();
+    }
+
+    EXPECT_TRUE(senderSuccess);
+    EXPECT_TRUE(receiverSuccess);
+    EXPECT_LT(senderSession.getBytesSent(), contentBytes.size()); // Confirms first 10 blocks were skipped!
+    EXPECT_TRUE(std::filesystem::exists(targetFile));
+    EXPECT_FALSE(std::filesystem::exists(tempPath));
+    EXPECT_FALSE(std::filesystem::exists(journalPath));
+
+    auto receivedBytes = readFileBytes(targetFile);
+    EXPECT_EQ(receivedBytes, contentBytes);
+}
+
+TEST_F(TransferTest, StaleJournalFallbackToFreshSync) {
+    std::filesystem::path senderFile = senderDir / "sender_stale.dat";
+    createTestFile(senderFile, 5000, 99);
+    auto contentBytes = readFileBytes(senderFile);
+
+    std::filesystem::path targetFile = receiverDir / "stale.dat";
+    std::filesystem::path tempPath = receiverDir / "stale.dat.peersync-tmp";
+    std::filesystem::path journalPath = receiverDir / "stale.dat.peersync-journal";
+
+    // Create a bogus stale journal and temp file
+    {
+        std::ofstream ofs(tempPath, std::ios::binary);
+        ofs << "old stale partial data";
+    }
+    {
+        std::ofstream ofs(journalPath);
+        ofs << "path=stale.dat\n";
+        ofs << "expected_size=99999\n";
+        ofs << "sig_hash=0000000000000000\n"; // Bogus signature hash
+        ofs << "last_seq=5\n";
+    }
+
+    peersync::TcpSocket server = peersync::TcpSocket::listen(0, "127.0.0.1");
+    uint16_t port = server.getBoundPort();
+
+    peersync::TcpSocket acceptedSocket;
+    std::thread acceptThread([&]() {
+        acceptedSocket = server.accept();
+    });
+    peersync::TcpSocket client = peersync::TcpSocket::connect("127.0.0.1", port);
+    if (acceptThread.joinable()) {
+        acceptThread.join();
+    }
+
+    bool receiverSuccess = false;
+    std::thread receiverThread([&]() {
+        try {
+            peersync::TransferSession session(acceptedSocket);
+            receiverSuccess = session.receiveFile(receiverDir);
+        } catch (...) {
+            receiverSuccess = false;
+        }
+    });
+
+    peersync::TransferSession senderSession(client);
+    bool senderSuccess = senderSession.sendFile(senderFile, "stale.dat");
+
+    if (receiverThread.joinable()) {
+        receiverThread.join();
+    }
+
+    EXPECT_TRUE(senderSuccess);
+    EXPECT_TRUE(receiverSuccess);
+
+    EXPECT_TRUE(std::filesystem::exists(targetFile));
+    EXPECT_FALSE(std::filesystem::exists(tempPath));
+    EXPECT_FALSE(std::filesystem::exists(journalPath));
+
+    auto receivedBytes = readFileBytes(targetFile);
+    EXPECT_EQ(receivedBytes, contentBytes);
 }

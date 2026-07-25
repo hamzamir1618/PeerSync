@@ -82,6 +82,7 @@ struct ResumeRequestMessage {
     std::string relativePath;
     std::string fileHash;
     uint64_t lastOffset;
+    std::vector<BlockSignature> signatures;
 };
 
 struct ResumeResponseMessage {
