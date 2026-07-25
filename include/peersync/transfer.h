@@ -19,7 +19,8 @@ public:
         size_t maxInstructionsPerMessage = 500; // Max instructions in a single DeltaInstructions message
     };
 
-    explicit TransferSession(TcpSocket& socket, Config config = {});
+    explicit TransferSession(TcpSocket& socket);
+    TransferSession(TcpSocket& socket, Config config);
 
     // Sender role: initiate transfer of localFile to peer, named relativePath on the receiver
     bool sendFile(const std::filesystem::path& localFile, const std::string& relativePath);

@@ -75,6 +75,11 @@ void deleteJournalAndTemp(const std::filesystem::path& targetFile) {
 
 namespace peersync {
 
+TransferSession::TransferSession(TcpSocket& socket)
+    : TransferSession(socket, Config{})
+{
+}
+
 TransferSession::TransferSession(TcpSocket& socket, Config config)
     : m_socket(socket)
     , m_config(config)
