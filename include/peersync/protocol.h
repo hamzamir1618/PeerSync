@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <peersync/socket.h>
 
 namespace peersync {
 
@@ -136,6 +137,23 @@ ResumeRequestMessage deserializeResumeRequestMessage(const std::vector<uint8_t>&
 ResumeResponseMessage deserializeResumeResponseMessage(const std::vector<uint8_t>& payload);
 TransferCompleteMessage deserializeTransferCompleteMessage(const std::vector<uint8_t>& payload);
 ErrorMessageMessage deserializeErrorMessageMessage(const std::vector<uint8_t>& payload);
+
+// Typed socket messaging layer
+void sendMessage(TcpSocket& sock, const HelloMessage& msg);
+void sendMessage(TcpSocket& sock, const PairChallengeMessage& msg);
+void sendMessage(TcpSocket& sock, const PairResponseMessage& msg);
+void sendMessage(TcpSocket& sock, const PairResultMessage& msg);
+void sendMessage(TcpSocket& sock, const ManifestRequestMessage& msg);
+void sendMessage(TcpSocket& sock, const ManifestResponseMessage& msg);
+void sendMessage(TcpSocket& sock, const DeltaInstructionsMessage& msg);
+void sendMessage(TcpSocket& sock, const BlockDataMessage& msg);
+void sendMessage(TcpSocket& sock, const TransferAckMessage& msg);
+void sendMessage(TcpSocket& sock, const ResumeRequestMessage& msg);
+void sendMessage(TcpSocket& sock, const ResumeResponseMessage& msg);
+void sendMessage(TcpSocket& sock, const TransferCompleteMessage& msg);
+void sendMessage(TcpSocket& sock, const ErrorMessageMessage& msg);
+
+MessageType peekNextMessageType(TcpSocket& sock, std::vector<uint8_t>& outRawPayload);
 
 } // namespace peersync
 

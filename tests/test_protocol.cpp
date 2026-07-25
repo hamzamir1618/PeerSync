@@ -3,6 +3,8 @@
 #include <peersync/exceptions.h>
 #include <vector>
 #include <string>
+#include <thread>
+#include <peersync/socket.h>
 
 using namespace peersync;
 
@@ -191,4 +193,65 @@ TEST(ProtocolTest, InvalidMessageTypeThrowsException) {
     // Empty payload
     std::vector<uint8_t> emptyPayload;
     EXPECT_THROW(getMessageType(emptyPayload), PeerSyncProtocolException);
+}
+
+TEST(ProtocolTest, SocketTypedMessagingRoundTrip) {
+    TcpSocket server = TcpSocket::listen(0, "127.0.0.1");
+    uint16_t port = server.getBoundPort();
+
+    TcpSocket acceptedSocket;
+    std::thread serverThread([&]() {
+        acceptedSocket = server.accept();
+    });
+
+    TcpSocket client = TcpSocket::connect("127.0.0.1", port);
+    if (serverThread.joinable()) {
+        serverThread.join();
+    }
+    ASSERT_TRUE(client.isValid());
+    ASSERT_TRUE(acceptedSocket.isValid());
+
+    // 1. Send HelloMessage from client -> server
+    HelloMessage hello{"MyLaptop", "v1.0"};
+    sendMessage(client, hello);
+
+    std::vector<uint8_t> rawPayload;
+    MessageType tag = peekNextMessageType(acceptedSocket, rawPayload);
+    EXPECT_EQ(tag, MessageType::Hello);
+    auto decodedHello = deserializeHelloMessage(rawPayload);
+    EXPECT_EQ(decodedHello.deviceName, "MyLaptop");
+    EXPECT_EQ(decodedHello.protocolVersion, "v1.0");
+
+    // 2. Send ManifestResponseMessage from server -> client
+    ManifestResponseMessage manifest;
+    manifest.files.push_back({"test.doc", 2048, "hash_abc", 1000});
+    sendMessage(acceptedSocket, manifest);
+
+    tag = peekNextMessageType(client, rawPayload);
+    EXPECT_EQ(tag, MessageType::ManifestResponse);
+    auto decodedManifest = deserializeManifestResponseMessage(rawPayload);
+    ASSERT_EQ(decodedManifest.files.size(), 1u);
+    EXPECT_EQ(decodedManifest.files[0].relativePath, "test.doc");
+    EXPECT_EQ(decodedManifest.files[0].fileSize, 2048u);
+
+    // 3. Send BlockDataMessage from client -> server
+    BlockDataMessage block{"test.doc", 0, {0xAA, 0xBB, 0xCC}};
+    sendMessage(client, block);
+
+    tag = peekNextMessageType(acceptedSocket, rawPayload);
+    EXPECT_EQ(tag, MessageType::BlockData);
+    auto decodedBlock = deserializeBlockDataMessage(rawPayload);
+    EXPECT_EQ(decodedBlock.relativePath, "test.doc");
+    EXPECT_EQ(decodedBlock.offset, 0u);
+    EXPECT_EQ(decodedBlock.data, block.data);
+
+    // 4. Send ErrorMessageMessage from server -> client
+    ErrorMessageMessage err{500, "Internal Sync Error"};
+    sendMessage(acceptedSocket, err);
+
+    tag = peekNextMessageType(client, rawPayload);
+    EXPECT_EQ(tag, MessageType::ErrorMessage);
+    auto decodedErr = deserializeErrorMessageMessage(rawPayload);
+    EXPECT_EQ(decodedErr.errorCode, 500u);
+    EXPECT_EQ(decodedErr.errorMessage, "Internal Sync Error");
 }

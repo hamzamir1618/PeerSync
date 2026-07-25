@@ -1,5 +1,6 @@
 #include <peersync/protocol.h>
 #include <peersync/exceptions.h>
+#include <peersync/message_framing.h>
 
 namespace peersync {
 
@@ -422,6 +423,34 @@ ErrorMessageMessage deserializeErrorMessageMessage(const std::vector<uint8_t>& p
     msg.errorMessage = reader.readString();
     reader.expectEOF();
     return msg;
+}
+
+namespace {
+
+template <typename T>
+void sendTypedMessage(TcpSocket& sock, const T& msg) {
+    sendFramedMessage(sock, serializeMessage(msg));
+}
+
+} // anonymous namespace
+
+void sendMessage(TcpSocket& sock, const HelloMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const PairChallengeMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const PairResponseMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const PairResultMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const ManifestRequestMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const ManifestResponseMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const DeltaInstructionsMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const BlockDataMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const TransferAckMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const ResumeRequestMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const ResumeResponseMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const TransferCompleteMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const ErrorMessageMessage& msg) { sendTypedMessage(sock, msg); }
+
+MessageType peekNextMessageType(TcpSocket& sock, std::vector<uint8_t>& outRawPayload) {
+    outRawPayload = recvFramedMessage(sock);
+    return getMessageType(outRawPayload);
 }
 
 } // namespace peersync
