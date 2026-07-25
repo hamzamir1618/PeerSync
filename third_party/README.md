@@ -15,3 +15,8 @@ This directory contains single-header and drop-in libraries that are directly ve
 - **License**: zlib License
 - **Pinned Version**: `v2.9.3`
 - **Purpose**: Cross-platform C/C++ library for native file open, save, and folder selection dialogs. Used by the GUI frontend for file and directory selection without requiring heavy GUI frameworks.
+
+## Cryptographic Algorithms (SHA-256 / HMAC / PBKDF2)
+
+- **Status**: Implemented directly in `src/core/pairing.cpp` (no third-party dependency vendored).
+- **Purpose**: Provides standard SHA-256 (RFC 6234), HMAC-SHA256 (RFC 2104), and PBKDF2 (RFC 2898) for PIN verification and session key derivation. Implemented directly as a compact, self-contained C++17 module to eliminate dependency overhead and licensing complexity while maintaining mathematical compliance with standard RFC test vectors.

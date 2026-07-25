@@ -1,4 +1,4 @@
-add_library(peersync_core core.cpp socket.cpp socket.h message_framing.cpp message_framing.h protocol.cpp protocol.h discovery.cpp discovery.h)
+add_library(peersync_core core.cpp socket.cpp socket.h message_framing.cpp message_framing.h protocol.cpp protocol.h discovery.cpp discovery.h pairing.cpp pairing.h)
 add_library(peersync::core ALIAS peersync_core)
 
 target_include_directories(peersync_core PUBLIC

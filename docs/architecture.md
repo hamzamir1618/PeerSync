@@ -90,5 +90,14 @@ Within the framed binary payload, the very first byte specifies the `MessageType
 - **`TransferAck` (9)**: Acknowledges successful receipt and disk persistence of transmitted block bytes.
 - **`ResumeRequest` (10)**: Inquires whether a partially interrupted file transfer can be resumed from a recorded offset.
 - **`ResumeResponse` (11)**: Returns resume eligibility status and confirms the valid byte offset to continue transmission from.
-- **`TransferComplete` (12)**: Signifies the conclusion of a file transfer and validates end-to-end file integrity against the final hash.
 - **`ErrorMessage` (13)**: Communicates protocol-level or filesystem errors (with numeric code and descriptive string) to the connected peer.
+
+## Pairing & Trust Model
+
+The **peersync** pairing mechanism (`src/core/pairing.cpp`) utilizes a random 6-digit numeric PIN (`generatePin()`) and PBKDF2-HMAC-SHA256 (`deriveSessionKey()`) to establish cryptographic authorization between connecting devices.
+
+> [!IMPORTANT]
+> **Scope Limitation — Authentication vs. Encryption**:
+> The PIN-based pairing handshake authenticates that both sides know the same secret PIN before any file synchronization or manifest transfer proceeds. **It does NOT encrypt the file data or protocol traffic itself.**
+>
+> This is a known, deliberate scope limitation for the current local-network architecture rather than an oversight. Operating over private local area networks (LANs), the primary threat model addressed is preventing unauthorized local devices from initiating sync connections or reading file trees without user authorization. Encrypting the entire transport byte stream is a natural candidate for a future TLS-based enhancement (e.g., wrapping `TcpSocket` in TLS/SSL).
