@@ -61,3 +61,7 @@ cmake -S . -B build -DPEERSYNC_BUILD_TESTS=ON && cmake --build build && ctest --
 
 - `PEERSYNC_BUILD_TESTS`: Build unit tests (Default: `ON`)
 - `PEERSYNC_BUILD_GUI`: Build GUI frontend (Default: `ON`)
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on pull request requirements, testing guidelines, and local development.
