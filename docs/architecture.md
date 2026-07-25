@@ -101,3 +101,43 @@ The **peersync** pairing mechanism (`src/core/pairing.cpp`) utilizes a random 6-
 > The PIN-based pairing handshake authenticates that both sides know the same secret PIN before any file synchronization or manifest transfer proceeds. **It does NOT encrypt the file data or protocol traffic itself.**
 >
 > This is a known, deliberate scope limitation for the current local-network architecture rather than an oversight. Operating over private local area networks (LANs), the primary threat model addressed is preventing unauthorized local devices from initiating sync connections or reading file trees without user authorization. Encrypting the entire transport byte stream is a natural candidate for a future TLS-based enhancement (e.g., wrapping `TcpSocket` in TLS/SSL).
+
+## Delta Sync Algorithm
+
+When synchronizing large files that have been modified, **peersync** avoids transferring entire file contents over the network by utilizing an rsync-derived delta synchronization engine (`src/core/delta.cpp`). The algorithm operates in two phases: signature computation over the old file and rolling-window delta scanning over the new file.
+
+```
+Old File (Remote): [Block 0: Sig] [Block 1: Sig] [Block 2: Sig] ...
+                         ^               ^
+New File (Local):  [Literal Bytes] [Copied Block 1] [Literal Bytes] ...
+```
+
+### 1. Two-Tier Signature Computation (`computeSignatures`)
+The destination peer divides its existing version of the file into non-overlapping sequential blocks of size `blockSize` (with the final block possibly shorter) and computes two cryptographic identifiers for each block:
+- **Weak Rolling Checksum (Adler-32)**: A 32-bit checksum ($M = 65521$) that can be updated in $O(1)$ time as a sliding byte window moves across a file.
+- **Strong Hash (xxHash64)**: A 64-bit non-cryptographic hash (`XXH64`) providing extremely low collision probability to confirm exact block content matches.
+
+These signatures (`BlockSignature`) are sent to the source peer, which constructs an in-memory hash map keyed by weak checksum to enable $O(1)$ average-case candidate block lookups.
+
+### 2. Rolling-Window Scanning (`computeDelta`)
+The source peer scans the local modified file byte-by-byte using a sliding window of size `blockSize`:
+1. **$O(1)$ Rolling Updates**: As the window shifts forward by one byte, the Adler-32 checksum is updated in $O(1)$ time (`rollAdler32`) by subtracting the outgoing byte's contribution and adding the incoming byte's contribution without recomputing from scratch.
+2. **Two-Tier Match Verification**: At each window position, the rolling weak checksum is looked up in the signature hash map. On a hit, `xxHash64` is computed over the window and compared against candidate blocks to rule out weak-checksum collisions.
+3. **Copy vs. Literal Emission**:
+   - **On Match**: Any pending unmatched bytes accumulated before this point are emitted as a `Literal` instruction (`DeltaInstructionType::Literal`). Then, a `Copy` instruction (`DeltaInstructionType::Copy`) referencing the matched remote block index is emitted, and the scanning window advances by a full `blockSize`, skipping the matched region entirely.
+   - **On Miss**: The leftmost byte of the window is appended to a pending literal buffer, and the window rolls forward by one byte.
+
+### Why Rolling Checksums Beat Naive Fixed-Offset Diffing
+A naive diffing algorithm that compares fixed file offsets (e.g., block 0 vs block 0, block 1 vs block 1) fails completely when bytes are **inserted or deleted** anywhere in the file. An insertion of even a single byte shifts all trailing data by one offset, causing all subsequent fixed-offset blocks to mismatch and forcing a full retransmission of unchanged content.
+
+By using a **byte-by-byte rolling checksum**, the scanning window naturally re-synchronizes with remote block boundaries immediately after an insertion or deletion. Once the sliding window rolls past the modified bytes, it re-aligns with the original trailing blocks, hitting the hash map and emitting lightweight `Copy` instructions for all remaining unchanged content.
+
+### Block Size Selection and Tradeoffs
+The default block size in **peersync** is configurable (typically **64 KB** for large files and **4 KB** to **16 KB** for smaller datasets). Selecting the optimal block size involves a fundamental size/speed tradeoff:
+- **Smaller Block Sizes (e.g., 4 KB - 16 KB)**:
+  - **Pros**: Higher granularity. Small edits in localized regions result in less literal data transmission because fewer unchanged bytes are trapped inside a modified block.
+  - **Cons**: Larger memory overhead and network payload for signature lists (more signatures per megabyte of file), and higher CPU overhead from more frequent hash map lookups.
+- **Larger Block Sizes (e.g., 64 KB - 256 KB)**:
+  - **Pros**: Extremely compact signature lists, minimal memory usage, and very high scanning throughput (fewer blocks to index and match).
+  - **Cons**: Coarser granularity. A single byte edit forces retransmission of up to an entire `blockSize` literal buffer if no other block boundaries align.
+

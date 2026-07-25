@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <peersync/socket.h>
+#include <peersync/delta.h>
 
 namespace peersync {
 
@@ -57,12 +58,6 @@ struct ManifestResponseMessage {
     std::vector<FileEntry> files;
 };
 
-struct DeltaInstruction {
-    uint64_t blockIndex;
-    uint64_t offset;
-    uint64_t length;
-    std::string checksum;
-};
 
 struct DeltaInstructionsMessage {
     std::string relativePath;

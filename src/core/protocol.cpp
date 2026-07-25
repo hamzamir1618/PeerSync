@@ -274,10 +274,12 @@ std::vector<uint8_t> serializeMessage(const DeltaInstructionsMessage& msg) {
     writeU32(buf, msg.blockSize);
     writeU32(buf, static_cast<uint32_t>(msg.instructions.size()));
     for (const auto& inst : msg.instructions) {
-        writeU64(buf, inst.blockIndex);
-        writeU64(buf, inst.offset);
-        writeU64(buf, inst.length);
-        writeString(buf, inst.checksum);
+        writeU8(buf, static_cast<uint8_t>(inst.type));
+        if (inst.type == DeltaInstructionType::Copy) {
+            writeU64(buf, inst.blockIndex);
+        } else {
+            writeBytes(buf, inst.bytes);
+        }
     }
     return buf;
 }
@@ -292,12 +294,16 @@ DeltaInstructionsMessage deserializeDeltaInstructionsMessage(const std::vector<u
     uint32_t count = reader.readU32();
     msg.instructions.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
-        DeltaInstruction inst;
-        inst.blockIndex = reader.readU64();
-        inst.offset = reader.readU64();
-        inst.length = reader.readU64();
-        inst.checksum = reader.readString();
-        msg.instructions.push_back(inst);
+        uint8_t typeVal = reader.readU8();
+        if (typeVal == static_cast<uint8_t>(DeltaInstructionType::Copy)) {
+            uint64_t idx = reader.readU64();
+            msg.instructions.push_back(DeltaInstruction::Copy(idx));
+        } else if (typeVal == static_cast<uint8_t>(DeltaInstructionType::Literal)) {
+            std::vector<uint8_t> data = reader.readBytes();
+            msg.instructions.push_back(DeltaInstruction::Literal(std::move(data)));
+        } else {
+            throw PeerSyncProtocolException("Unknown DeltaInstructionType tag: " + std::to_string(typeVal));
+        }
     }
     reader.expectEOF();
     return msg;

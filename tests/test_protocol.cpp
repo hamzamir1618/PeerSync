@@ -96,8 +96,9 @@ TEST(ProtocolTest, DeltaInstructionsMessageRoundTrip) {
     msg.relativePath = "huge_database.db";
     msg.targetFileSize = 10000000000ULL;
     msg.blockSize = 65536;
-    msg.instructions.push_back({0, 0, 65536, "checksum0"});
-    msg.instructions.push_back({99999, 655350000, 32768, "checksum99999"});
+    msg.instructions.push_back(DeltaInstruction::Copy(0));
+    msg.instructions.push_back(DeltaInstruction::Literal({0x10, 0x20, 0x30, 0x40}));
+    msg.instructions.push_back(DeltaInstruction::Copy(99999));
 
     auto payload = serializeMessage(msg);
     EXPECT_EQ(getMessageType(payload), MessageType::DeltaInstructions);
@@ -106,11 +107,13 @@ TEST(ProtocolTest, DeltaInstructionsMessageRoundTrip) {
     EXPECT_EQ(decoded.relativePath, msg.relativePath);
     EXPECT_EQ(decoded.targetFileSize, msg.targetFileSize);
     EXPECT_EQ(decoded.blockSize, msg.blockSize);
-    ASSERT_EQ(decoded.instructions.size(), 2u);
-    EXPECT_EQ(decoded.instructions[1].blockIndex, 99999u);
-    EXPECT_EQ(decoded.instructions[1].offset, 655350000u);
-    EXPECT_EQ(decoded.instructions[1].length, 32768u);
-    EXPECT_EQ(decoded.instructions[1].checksum, "checksum99999");
+    ASSERT_EQ(decoded.instructions.size(), 3u);
+    EXPECT_EQ(decoded.instructions[0].type, DeltaInstructionType::Copy);
+    EXPECT_EQ(decoded.instructions[0].blockIndex, 0u);
+    EXPECT_EQ(decoded.instructions[1].type, DeltaInstructionType::Literal);
+    EXPECT_EQ(decoded.instructions[1].bytes, std::vector<uint8_t>({0x10, 0x20, 0x30, 0x40}));
+    EXPECT_EQ(decoded.instructions[2].type, DeltaInstructionType::Copy);
+    EXPECT_EQ(decoded.instructions[2].blockIndex, 99999u);
 }
 
 TEST(ProtocolTest, BlockDataMessageRoundTrip) {

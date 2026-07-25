@@ -133,3 +133,137 @@ TEST_F(DeltaTest, OneBlockDifferenceProducesExactlyOneSignatureDifference) {
     EXPECT_EQ(sigs1[3].weakChecksum, sigs2[3].weakChecksum);
     EXPECT_EQ(sigs1[3].strongHash, sigs2[3].strongHash);
 }
+
+TEST_F(DeltaTest, RollAdler32MatchesFromScratch) {
+    std::vector<uint8_t> data(200);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<uint8_t>((i * 17 + 29) & 0xFF);
+    }
+
+    size_t winLen = 40;
+    uint32_t currentWeak = peersync::computeAdler32(data.data(), winLen);
+
+    for (size_t i = 0; i + winLen < data.size(); ++i) {
+        uint32_t rolled = peersync::rollAdler32(currentWeak, data[i], data[i + winLen], winLen);
+        uint32_t fromScratch = peersync::computeAdler32(&data[i + 1], winLen);
+        EXPECT_EQ(rolled, fromScratch) << "Mismatch at rolling step i=" << i;
+        currentWeak = rolled;
+    }
+}
+
+TEST_F(DeltaTest, IdenticalFileProducesPureCopyInstructions) {
+    std::vector<uint8_t> data(500);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<uint8_t>((i * 5 + 7) & 0xFF);
+    }
+    fs::path file = createTempFile("identical.bin", data);
+
+    auto sigs = peersync::computeSignatures(file, 100);
+    auto delta = peersync::computeDelta(file, sigs, 100);
+
+    ASSERT_EQ(delta.size(), 5u);
+    for (size_t i = 0; i < delta.size(); ++i) {
+        EXPECT_EQ(delta[i].type, peersync::DeltaInstructionType::Copy);
+        EXPECT_EQ(delta[i].blockIndex, static_cast<uint64_t>(i));
+        EXPECT_TRUE(delta[i].bytes.empty());
+    }
+}
+
+TEST_F(DeltaTest, OneByteChangedProducesSmallMinorityOfLiteralInstructions) {
+    // Old file: 10 blocks of 100 bytes = 1000 bytes
+    std::vector<uint8_t> oldData(1000);
+    for (size_t i = 0; i < oldData.size(); ++i) {
+        oldData[i] = static_cast<uint8_t>((i * 13 + 3) & 0xFF);
+    }
+    fs::path oldFile = createTempFile("old_change.bin", oldData);
+
+    std::vector<uint8_t> newData = oldData;
+    // Change a single byte near the start (in block 0)
+    newData[10] ^= 0xFF;
+    fs::path newFile = createTempFile("new_change.bin", newData);
+
+    auto sigs = peersync::computeSignatures(oldFile, 100);
+    auto delta = peersync::computeDelta(newFile, sigs, 100);
+
+    uint64_t totalBytesCovered = 0;
+    uint64_t literalBytes = 0;
+    uint64_t copyCount = 0;
+
+    for (const auto& inst : delta) {
+        if (inst.type == peersync::DeltaInstructionType::Copy) {
+            totalBytesCovered += 100; // All blocks in this test are 100 bytes
+            copyCount++;
+        } else if (inst.type == peersync::DeltaInstructionType::Literal) {
+            totalBytesCovered += inst.bytes.size();
+            literalBytes += inst.bytes.size();
+        }
+    }
+
+    // Total byte coverage must reconstruct full file length
+    EXPECT_EQ(totalBytesCovered, 1000u);
+
+    // Literal instructions must be a small minority of total instructions/bytes
+    EXPECT_LE(literalBytes, 200u);
+    EXPECT_GE(copyCount, 8u);
+}
+
+TEST_F(DeltaTest, InsertedBytesResyncsRollingWindow) {
+    // Old file: 5 blocks of 100 bytes = 500 bytes
+    std::vector<uint8_t> oldData(500);
+    for (size_t i = 0; i < oldData.size(); ++i) {
+        oldData[i] = static_cast<uint8_t>((i * 19 + 41) & 0xFF);
+    }
+    fs::path oldFile = createTempFile("old_insert.bin", oldData);
+
+    // New file: insert 50 bytes between block 1 (ends at 200) and block 2 (starts at 200)
+    std::vector<uint8_t> newData(oldData.begin(), oldData.begin() + 200);
+    for (int i = 0; i < 50; ++i) {
+        newData.push_back(static_cast<uint8_t>(0xEE));
+    }
+    newData.insert(newData.end(), oldData.begin() + 200, oldData.end());
+    fs::path newFile = createTempFile("new_insert.bin", newData);
+
+    auto sigs = peersync::computeSignatures(oldFile, 100);
+    auto delta = peersync::computeDelta(newFile, sigs, 100);
+
+    uint64_t totalBytesCovered = 0;
+    std::vector<uint64_t> copiedBlocks;
+
+    for (const auto& inst : delta) {
+        if (inst.type == peersync::DeltaInstructionType::Copy) {
+            totalBytesCovered += 100;
+            copiedBlocks.push_back(inst.blockIndex);
+        } else if (inst.type == peersync::DeltaInstructionType::Literal) {
+            totalBytesCovered += inst.bytes.size();
+        }
+    }
+
+    EXPECT_EQ(totalBytesCovered, 550u);
+
+    // Verify that all 5 original blocks were matched via Copy instructions,
+    // proving the rolling window re-synced after the 50-byte insertion!
+    ASSERT_EQ(copiedBlocks.size(), 5u);
+    EXPECT_EQ(copiedBlocks[0], 0u);
+    EXPECT_EQ(copiedBlocks[1], 1u);
+    EXPECT_EQ(copiedBlocks[2], 2u);
+    EXPECT_EQ(copiedBlocks[3], 3u);
+    EXPECT_EQ(copiedBlocks[4], 4u);
+}
+
+TEST_F(DeltaTest, UnrelatedFileProducesAllLiteralInstructions) {
+    std::vector<uint8_t> oldData(500, 0xAA);
+    std::vector<uint8_t> newData(500, 0x55);
+
+    fs::path oldFile = createTempFile("old_unrelated.bin", oldData);
+    fs::path newFile = createTempFile("new_unrelated.bin", newData);
+
+    auto sigs = peersync::computeSignatures(oldFile, 100);
+    auto delta = peersync::computeDelta(newFile, sigs, 100);
+
+    uint64_t totalLiteralBytes = 0;
+    for (const auto& inst : delta) {
+        EXPECT_EQ(inst.type, peersync::DeltaInstructionType::Literal);
+        totalLiteralBytes += inst.bytes.size();
+    }
+    EXPECT_EQ(totalLiteralBytes, 500u);
+}
