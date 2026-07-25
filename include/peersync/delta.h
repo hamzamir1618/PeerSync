@@ -52,6 +52,12 @@ std::vector<DeltaInstruction> computeDelta(const std::filesystem::path& newFile,
                                            const std::vector<BlockSignature>& oldFileSignatures,
                                            size_t blockSize);
 
+// Reconstructs target file by applying instructions against oldFile and writing to outputFile atomically.
+void reconstructFile(const std::filesystem::path& oldFile,
+                     const std::vector<DeltaInstruction>& instructions,
+                     const std::filesystem::path& outputFile,
+                     size_t blockSize);
+
 } // namespace peersync
 
 #endif // PEERSYNC_DELTA_H

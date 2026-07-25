@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <utility>
 #include <xxhash.h>
+#include <random>
 
 namespace peersync {
 
@@ -173,6 +174,121 @@ std::vector<DeltaInstruction> computeDelta(const std::filesystem::path& newFile,
     }
 
     return instructions;
+}
+
+void reconstructFile(const std::filesystem::path& oldFile,
+                     const std::vector<DeltaInstruction>& instructions,
+                     const std::filesystem::path& outputFile,
+                     size_t blockSize) {
+    if (blockSize == 0) {
+        throw PeerSyncDeltaException("Block size must be greater than zero");
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(oldFile, ec) || ec) {
+        throw PeerSyncDeltaException("Old file does not exist: " + oldFile.string());
+    }
+
+    uint64_t oldFileSize = std::filesystem::file_size(oldFile, ec);
+    if (ec) {
+        throw PeerSyncDeltaException("Failed to get old file size: " + oldFile.string());
+    }
+
+    std::filesystem::path parentDir = outputFile.parent_path();
+    if (parentDir.empty()) {
+        parentDir = ".";
+    }
+    if (!std::filesystem::exists(parentDir, ec)) {
+        std::filesystem::create_directories(parentDir, ec);
+        if (ec) {
+            throw PeerSyncDeltaException("Failed to create parent directory for output file: " + outputFile.string());
+        }
+    }
+
+    std::random_device rd;
+    std::filesystem::path tempPath = parentDir / (outputFile.filename().string() + ".tmp." + std::to_string(rd()));
+
+    struct TempFileGuard {
+        std::filesystem::path path;
+        bool commit = false;
+        ~TempFileGuard() {
+            if (!commit) {
+                std::error_code ec_remove;
+                std::filesystem::remove(path, ec_remove);
+            }
+        }
+    } guard{tempPath, false};
+
+    std::ifstream ifs(oldFile, std::ios::binary);
+    if (!ifs.is_open()) {
+        throw PeerSyncDeltaException("Failed to open old file for reading: " + oldFile.string());
+    }
+
+    std::ofstream ofs(tempPath, std::ios::binary);
+    if (!ofs.is_open()) {
+        throw PeerSyncDeltaException("Failed to open temporary file for writing: " + tempPath.string());
+    }
+
+    std::vector<uint8_t> buffer(blockSize);
+
+    for (const auto& inst : instructions) {
+        if (inst.type == DeltaInstructionType::Copy) {
+            uint64_t offset = inst.blockIndex * blockSize;
+            if (offset >= oldFileSize && !(oldFileSize == 0 && offset == 0 && inst.blockIndex == 0)) {
+                throw PeerSyncDeltaException("Copy instruction block index out of bounds");
+            }
+            if (oldFileSize == 0) {
+                throw PeerSyncDeltaException("Cannot copy from an empty file");
+            }
+            size_t bytesToRead = static_cast<size_t>(std::min(static_cast<uint64_t>(blockSize), oldFileSize - offset));
+            ifs.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+            if (!ifs) {
+                throw PeerSyncDeltaException("Failed to seek in old file");
+            }
+            ifs.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(bytesToRead));
+            if (ifs.gcount() != static_cast<std::streamsize>(bytesToRead)) {
+                throw PeerSyncDeltaException("Failed to read expected bytes from old file");
+            }
+            ofs.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(bytesToRead));
+            if (!ofs) {
+                throw PeerSyncDeltaException("Failed to write copy block to temporary file");
+            }
+        } else if (inst.type == DeltaInstructionType::Literal) {
+            if (!inst.bytes.empty()) {
+                ofs.write(reinterpret_cast<const char*>(inst.bytes.data()), static_cast<std::streamsize>(inst.bytes.size()));
+                if (!ofs) {
+                    throw PeerSyncDeltaException("Failed to write literal bytes to temporary file");
+                }
+            }
+        } else {
+            throw PeerSyncDeltaException("Unknown delta instruction type");
+        }
+    }
+
+    ifs.close();
+    ofs.flush();
+    ofs.close();
+    if (!ofs) {
+        throw PeerSyncDeltaException("Error flushing or closing temporary file");
+    }
+
+    std::error_code renameEc;
+    std::filesystem::rename(tempPath, outputFile, renameEc);
+    if (renameEc) {
+        if (std::filesystem::exists(outputFile)) {
+            std::error_code removeEc;
+            std::filesystem::remove(outputFile, removeEc);
+            if (!removeEc) {
+                renameEc.clear();
+                std::filesystem::rename(tempPath, outputFile, renameEc);
+            }
+        }
+        if (renameEc) {
+            throw PeerSyncDeltaException("Failed to rename temporary file to output file: " + renameEc.message());
+        }
+    }
+
+    guard.commit = true;
 }
 
 } // namespace peersync

@@ -29,6 +29,12 @@ protected:
         return filePath;
     }
 
+    std::vector<uint8_t> readFileBytes(const fs::path& p) {
+        std::ifstream ifs(p, std::ios::binary);
+        if (!ifs.is_open()) return {};
+        return std::vector<uint8_t>(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+    }
+
     fs::path testDir_;
 };
 
@@ -266,4 +272,127 @@ TEST_F(DeltaTest, UnrelatedFileProducesAllLiteralInstructions) {
         totalLiteralBytes += inst.bytes.size();
     }
     EXPECT_EQ(totalLiteralBytes, 500u);
+}
+
+TEST_F(DeltaTest, RoundTripIdenticalFiles) {
+    std::vector<uint8_t> data(600);
+    for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<uint8_t>((i * 7 + 11) & 0xFF);
+    fs::path oldFile = createTempFile("rt_ident_old.bin", data);
+    fs::path newFile = createTempFile("rt_ident_new.bin", data);
+    fs::path outputFile = testDir_ / "rt_ident_out.bin";
+
+    auto sigs = peersync::computeSignatures(oldFile, 64);
+    auto delta = peersync::computeDelta(newFile, sigs, 64);
+    peersync::reconstructFile(oldFile, delta, outputFile, 64);
+
+    EXPECT_EQ(readFileBytes(outputFile), data);
+}
+
+TEST_F(DeltaTest, RoundTripSmallEdit) {
+    std::vector<uint8_t> oldData(1000);
+    for (size_t i = 0; i < oldData.size(); ++i) oldData[i] = static_cast<uint8_t>((i * 13 + 5) & 0xFF);
+    std::vector<uint8_t> newData = oldData;
+    for (int i = 300; i < 320; ++i) newData[i] ^= 0xFF; // Modify 20 bytes in middle
+
+    fs::path oldFile = createTempFile("rt_edit_old.bin", oldData);
+    fs::path newFile = createTempFile("rt_edit_new.bin", newData);
+    fs::path outputFile = testDir_ / "rt_edit_out.bin";
+
+    auto sigs = peersync::computeSignatures(oldFile, 64);
+    auto delta = peersync::computeDelta(newFile, sigs, 64);
+    peersync::reconstructFile(oldFile, delta, outputFile, 64);
+
+    EXPECT_EQ(readFileBytes(outputFile), newData);
+}
+
+TEST_F(DeltaTest, RoundTripInsertion) {
+    std::vector<uint8_t> oldData(800);
+    for (size_t i = 0; i < oldData.size(); ++i) oldData[i] = static_cast<uint8_t>((i * 17 + 3) & 0xFF);
+    std::vector<uint8_t> newData(oldData.begin(), oldData.begin() + 400);
+    for (int i = 0; i < 75; ++i) newData.push_back(static_cast<uint8_t>(0x99)); // Insert 75 bytes
+    newData.insert(newData.end(), oldData.begin() + 400, oldData.end());
+
+    fs::path oldFile = createTempFile("rt_ins_old.bin", oldData);
+    fs::path newFile = createTempFile("rt_ins_new.bin", newData);
+    fs::path outputFile = testDir_ / "rt_ins_out.bin";
+
+    auto sigs = peersync::computeSignatures(oldFile, 64);
+    auto delta = peersync::computeDelta(newFile, sigs, 64);
+    peersync::reconstructFile(oldFile, delta, outputFile, 64);
+
+    EXPECT_EQ(readFileBytes(outputFile), newData);
+}
+
+TEST_F(DeltaTest, RoundTripCompletelyDifferentContent) {
+    std::vector<uint8_t> oldData(500, 0xAA);
+    std::vector<uint8_t> newData(700, 0x55);
+
+    fs::path oldFile = createTempFile("rt_diff_old.bin", oldData);
+    fs::path newFile = createTempFile("rt_diff_new.bin", newData);
+    fs::path outputFile = testDir_ / "rt_diff_out.bin";
+
+    auto sigs = peersync::computeSignatures(oldFile, 64);
+    auto delta = peersync::computeDelta(newFile, sigs, 64);
+    peersync::reconstructFile(oldFile, delta, outputFile, 64);
+
+    EXPECT_EQ(readFileBytes(outputFile), newData);
+}
+
+TEST_F(DeltaTest, RoundTripEmptyOldFile) {
+    std::vector<uint8_t> oldData;
+    std::vector<uint8_t> newData(350, 0x77);
+
+    fs::path oldFile = createTempFile("rt_empty_old.bin", oldData);
+    fs::path newFile = createTempFile("rt_empty_new.bin", newData);
+    fs::path outputFile = testDir_ / "rt_empty_old_out.bin";
+
+    auto sigs = peersync::computeSignatures(oldFile, 64);
+    auto delta = peersync::computeDelta(newFile, sigs, 64);
+    peersync::reconstructFile(oldFile, delta, outputFile, 64);
+
+    EXPECT_EQ(readFileBytes(outputFile), newData);
+}
+
+TEST_F(DeltaTest, RoundTripEmptyNewFile) {
+    std::vector<uint8_t> oldData(450, 0x88);
+    std::vector<uint8_t> newData;
+
+    fs::path oldFile = createTempFile("rt_empty_new_old.bin", oldData);
+    fs::path newFile = createTempFile("rt_empty_new_new.bin", newData);
+    fs::path outputFile = testDir_ / "rt_empty_new_out.bin";
+
+    auto sigs = peersync::computeSignatures(oldFile, 64);
+    auto delta = peersync::computeDelta(newFile, sigs, 64);
+    peersync::reconstructFile(oldFile, delta, outputFile, 64);
+
+    EXPECT_TRUE(fs::exists(outputFile));
+    EXPECT_EQ(fs::file_size(outputFile), 0u);
+    EXPECT_TRUE(readFileBytes(outputFile).empty());
+}
+
+TEST_F(DeltaTest, ReconstructFileFailureMidwayLeavesOriginalUntouched) {
+    std::string originalStr = "ORIGINAL GOOD DATA THAT MUST NOT BE CORRUPTED";
+    std::vector<uint8_t> originalData(originalStr.begin(), originalStr.end());
+    fs::path outputFile = createTempFile("protected_out.bin", originalData);
+
+    std::vector<uint8_t> oldData(100, 0x11);
+    fs::path oldFile = createTempFile("fail_mid_old.bin", oldData);
+
+    std::vector<peersync::DeltaInstruction> badInstructions = {
+        peersync::DeltaInstruction::Literal({0x41, 0x42, 0x43, 0x44}),
+        peersync::DeltaInstruction::Copy(999999)
+    };
+
+    EXPECT_THROW(
+        peersync::reconstructFile(oldFile, badInstructions, outputFile, 20),
+        peersync::PeerSyncDeltaException
+    );
+
+    EXPECT_TRUE(fs::exists(outputFile));
+    EXPECT_EQ(readFileBytes(outputFile), originalData);
+
+    for (const auto& entry : fs::directory_iterator(testDir_)) {
+        std::string fname = entry.path().filename().string();
+        EXPECT_EQ(fname.find(".tmp."), std::string::npos) << "Found leftover temp file: " << fname;
+    }
 }
