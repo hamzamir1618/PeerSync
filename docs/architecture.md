@@ -46,6 +46,19 @@ flowchart TD
 - **`gui` -> `libpeersync` + `tinyfiledialogs`**: The graphical interface drives `libpeersync` and directly incorporates `tinyfiledialogs` to provide native cross-platform file open, save, and folder selection dialogs without requiring heavy UI frameworks.
 - **`tests` -> `libpeersync` + `GoogleTest`**: The test executable links against `libpeersync` and `GoogleTest` (fetched automatically via CMake) to verify core discovery and transfer routines.
 
+## mDNS / DNS-SD Service Discovery
+
+Peer discovery in **peersync** is handled via Multicast DNS (mDNS) and DNS-Based Service Discovery (DNS-SD, RFC 6763) implemented in `PeerAdvertiser` using the vendored `mdns.h` library.
+- **Service Type**: Instances advertise themselves under the standard DNS-SD service type `_peersync._tcp.local.`.
+- **Dynamic Port & Instance Naming**: Each advertiser dynamically binds to the actual runtime TCP port assigned to the `TcpSocket` listener and constructs its instance name (defaulting to the local machine's hostname).
+- **Background Responder & Clean Shutdown**: A dedicated background thread listens for mDNS queries using a non-blocking socket and `select()` loop with a short timeout (100ms). This ensures that calling `stop()` or destroying the `PeerAdvertiser` cleanly unblocks and shuts down the responder thread without hanging.
+
+### Manual Verification Pattern
+> [!IMPORTANT]
+> **Multicast Verification Constraint**: While the packet construction, TXT record formatting, and query matching functions are heavily covered by automated unit tests in `tests/test_discovery.cpp`, **full multicast advertise+browse behavior across machines is verified manually** rather than in automated CI.
+>
+> Automated CI build runners and container network namespaces frequently filter, restrict, or disable UDP multicast traffic on port 5353, making deterministic end-to-end multicast testing impossible in sandboxed CI environments. Therefore, cross-machine discovery is verified manually across two physical machines or two local processes on a loopback interface where mDNS/multicast is locally supported, consistent with the project's established pattern for hard-to-automate GUI and network-hardware-dependent code.
+
 ## Wire Protocol
 
 All direct peer-to-peer communication in **peersync** is built on top of a reliable TCP message framing foundation implemented in `libpeersync` (`src/core/message_framing.cpp`). Because TCP is a continuous byte stream without native packet boundaries, every message transmitted over the network is encapsulated using a fixed-size length prefix framing structure:

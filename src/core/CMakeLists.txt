@@ -1,10 +1,12 @@
-add_library(peersync_core core.cpp socket.cpp socket.h message_framing.cpp message_framing.h protocol.cpp protocol.h)
+add_library(peersync_core core.cpp socket.cpp socket.h message_framing.cpp message_framing.h protocol.cpp protocol.h discovery.cpp discovery.h)
 add_library(peersync::core ALIAS peersync_core)
 
 target_include_directories(peersync_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<INSTALL_INTERFACE:include>
+PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party
 )
 
 if(WIN32)
