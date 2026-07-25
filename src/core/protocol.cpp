@@ -244,6 +244,12 @@ std::vector<uint8_t> serializeMessage(const ManifestResponseMessage& msg) {
         writeString(buf, file.sha256Hash);
         writeU64(buf, file.lastModified);
     }
+    writeU32(buf, static_cast<uint32_t>(msg.signatures.size()));
+    for (const auto& sig : msg.signatures) {
+        writeU32(buf, sig.weakChecksum);
+        writeU64(buf, sig.strongHash);
+        writeU64(buf, sig.blockIndex);
+    }
     return buf;
 }
 
@@ -260,6 +266,15 @@ ManifestResponseMessage deserializeManifestResponseMessage(const std::vector<uin
         file.sha256Hash = reader.readString();
         file.lastModified = reader.readU64();
         msg.files.push_back(file);
+    }
+    uint32_t sigCount = reader.readU32();
+    msg.signatures.reserve(sigCount);
+    for (uint32_t i = 0; i < sigCount; ++i) {
+        BlockSignature sig;
+        sig.weakChecksum = reader.readU32();
+        sig.strongHash = reader.readU64();
+        sig.blockIndex = reader.readU64();
+        msg.signatures.push_back(sig);
     }
     reader.expectEOF();
     return msg;
@@ -278,6 +293,7 @@ std::vector<uint8_t> serializeMessage(const DeltaInstructionsMessage& msg) {
         if (inst.type == DeltaInstructionType::Copy) {
             writeU64(buf, inst.blockIndex);
         } else {
+            writeU64(buf, inst.blockIndex);
             writeBytes(buf, inst.bytes);
         }
     }
@@ -299,8 +315,11 @@ DeltaInstructionsMessage deserializeDeltaInstructionsMessage(const std::vector<u
             uint64_t idx = reader.readU64();
             msg.instructions.push_back(DeltaInstruction::Copy(idx));
         } else if (typeVal == static_cast<uint8_t>(DeltaInstructionType::Literal)) {
+            uint64_t idx = reader.readU64();
             std::vector<uint8_t> data = reader.readBytes();
-            msg.instructions.push_back(DeltaInstruction::Literal(std::move(data)));
+            DeltaInstruction inst = DeltaInstruction::Literal(std::move(data));
+            inst.blockIndex = idx;
+            msg.instructions.push_back(std::move(inst));
         } else {
             throw PeerSyncProtocolException("Unknown DeltaInstructionType tag: " + std::to_string(typeVal));
         }

@@ -7,7 +7,7 @@ FetchContent_Declare(
 set(XXHASH_BUILD_XXHSUM OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(xxhash)
 
-add_library(peersync_core core.cpp socket.cpp socket.h message_framing.cpp message_framing.h protocol.cpp protocol.h discovery.cpp discovery.h pairing.cpp pairing.h delta.cpp delta.h ${xxhash_SOURCE_DIR}/xxhash.c)
+add_library(peersync_core core.cpp socket.cpp socket.h message_framing.cpp message_framing.h protocol.cpp protocol.h discovery.cpp discovery.h pairing.cpp pairing.h delta.cpp delta.h transfer.cpp transfer.h ${xxhash_SOURCE_DIR}/xxhash.c)
 add_library(peersync::core ALIAS peersync_core)
 
 target_include_directories(peersync_core PUBLIC

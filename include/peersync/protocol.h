@@ -56,6 +56,7 @@ struct FileEntry {
 
 struct ManifestResponseMessage {
     std::vector<FileEntry> files;
+    std::vector<BlockSignature> signatures;
 };
 
 
