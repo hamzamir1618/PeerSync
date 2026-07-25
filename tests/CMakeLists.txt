@@ -8,7 +8,9 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-add_executable(peersync_tests test_main.cpp)
+include(CTest)
+
+add_executable(peersync_tests test_placeholder.cpp)
 target_link_libraries(peersync_tests PRIVATE peersync_core GTest::gtest_main)
 
 include(GoogleTest)

@@ -13,6 +13,18 @@ peersync finds another instance of itself on the local network automatically, tr
 - [ ] Command-line interface (CLI)
 - [ ] Graphical user interface (GUI)
 
+## Dependencies
+
+### Vendored (in `third_party/`)
+- **mdns.h**: Single-header mDNS/DNS-SD library for local network peer discovery (Public Domain, pinned to tag `1.4.3`)
+- **tinyfiledialogs**: Cross-platform native file and folder selection dialog library for the GUI (zlib License, pinned to `v2.9.3`)
+
+### External (planned, via FetchContent)
+- **GoogleTest**: C++ testing framework for unit tests
+- **CLI11**: Command-line parser for the CLI frontend
+- **Dear ImGui**: Immediate-mode GUI library for the GUI frontend
+- **GLFW**: Windowing and input handling for Dear ImGui
+
 ## Build Instructions
 
 ### Prerequisites
@@ -27,14 +39,19 @@ peersync finds another instance of itself on the local network automatically, tr
 git clone https://github.com/yourusername/peersync.git
 cd peersync
 
-# Configure the build
-cmake -S . -B build
+# Configure the build with unit tests enabled
+cmake -S . -B build -DPEERSYNC_BUILD_TESTS=ON
 
 # Build the project
 cmake --build build
 
 # Run unit tests
-ctest --test-dir build --output-on-failure
+ctest --test-dir build
+```
+
+To configure, build, and test end-to-end in a single command:
+```bash
+cmake -S . -B build -DPEERSYNC_BUILD_TESTS=ON && cmake --build build && ctest --test-dir build
 ```
 
 ### CMake Options
