@@ -108,6 +108,10 @@ public:
         return bytes;
     }
 
+    bool hasMore() const {
+        return m_offset < m_data.size();
+    }
+
     void expectEOF() {
         if (m_offset != m_data.size()) {
             throw PeerSyncProtocolException("Trailing unparsed bytes in payload (" + std::to_string(m_data.size() - m_offset) + " bytes remaining)");
@@ -116,7 +120,7 @@ public:
 
     void expectMessageType(MessageType expectedType) {
         uint8_t tag = readU8();
-        if (tag < 1 || tag > 13) {
+        if (tag < 1 || tag > 15) {
             throw PeerSyncProtocolException("Unknown MessageType tag: " + std::to_string(tag));
         }
         MessageType actualType = static_cast<MessageType>(tag);
@@ -138,7 +142,7 @@ MessageType getMessageType(const std::vector<uint8_t>& payload) {
         throw PeerSyncProtocolException("Cannot read MessageType from empty payload");
     }
     uint8_t tag = payload[0];
-    if (tag < 1 || tag > 13) {
+    if (tag < 1 || tag > 15) {
         throw PeerSyncProtocolException("Unknown MessageType tag: " + std::to_string(tag));
     }
     return static_cast<MessageType>(tag);
@@ -465,6 +469,76 @@ ErrorMessageMessage deserializeErrorMessageMessage(const std::vector<uint8_t>& p
     return msg;
 }
 
+// DirectoryManifestRequestMessage
+std::vector<uint8_t> serializeMessage(const DirectoryManifestRequestMessage& msg) {
+    std::vector<uint8_t> buf;
+    writeU8(buf, static_cast<uint8_t>(MessageType::DirectoryManifestRequest));
+    writeU32(buf, static_cast<uint32_t>(msg.files.size()));
+    for (const auto& file : msg.files) {
+        writeString(buf, file.relativePath);
+        writeU64(buf, file.fileSize);
+        writeString(buf, file.sha256Hash);
+        writeU64(buf, file.lastModified);
+    }
+    return buf;
+}
+
+DirectoryManifestRequestMessage deserializeDirectoryManifestRequestMessage(const std::vector<uint8_t>& payload) {
+    BinaryReader reader(payload);
+    reader.expectMessageType(MessageType::DirectoryManifestRequest);
+    DirectoryManifestRequestMessage msg;
+    uint32_t count = reader.readU32();
+    msg.files.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        FileEntry file;
+        file.relativePath = reader.readString();
+        file.fileSize = reader.readU64();
+        file.sha256Hash = reader.readString();
+        file.lastModified = reader.readU64();
+        msg.files.push_back(file);
+    }
+    reader.expectEOF();
+    return msg;
+}
+
+// DirectoryManifestResponseMessage
+std::vector<uint8_t> serializeMessage(const DirectoryManifestResponseMessage& msg) {
+    std::vector<uint8_t> buf;
+    writeU8(buf, static_cast<uint8_t>(MessageType::DirectoryManifestResponse));
+    writeU32(buf, static_cast<uint32_t>(msg.files.size()));
+    for (const auto& file : msg.files) {
+        writeString(buf, file.relativePath);
+        writeU64(buf, file.fileSize);
+        writeString(buf, file.sha256Hash);
+        writeU64(buf, file.lastModified);
+    }
+    writeU16(buf, msg.workerPort);
+    return buf;
+}
+
+DirectoryManifestResponseMessage deserializeDirectoryManifestResponseMessage(const std::vector<uint8_t>& payload) {
+    BinaryReader reader(payload);
+    reader.expectMessageType(MessageType::DirectoryManifestResponse);
+    DirectoryManifestResponseMessage msg;
+    uint32_t count = reader.readU32();
+    msg.files.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        FileEntry file;
+        file.relativePath = reader.readString();
+        file.fileSize = reader.readU64();
+        file.sha256Hash = reader.readString();
+        file.lastModified = reader.readU64();
+        msg.files.push_back(file);
+    }
+    if (reader.hasMore()) {
+        msg.workerPort = reader.readU16();
+    } else {
+        msg.workerPort = 0;
+    }
+    reader.expectEOF();
+    return msg;
+}
+
 namespace {
 
 template <typename T>
@@ -487,6 +561,8 @@ void sendMessage(TcpSocket& sock, const ResumeRequestMessage& msg) { sendTypedMe
 void sendMessage(TcpSocket& sock, const ResumeResponseMessage& msg) { sendTypedMessage(sock, msg); }
 void sendMessage(TcpSocket& sock, const TransferCompleteMessage& msg) { sendTypedMessage(sock, msg); }
 void sendMessage(TcpSocket& sock, const ErrorMessageMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const DirectoryManifestRequestMessage& msg) { sendTypedMessage(sock, msg); }
+void sendMessage(TcpSocket& sock, const DirectoryManifestResponseMessage& msg) { sendTypedMessage(sock, msg); }
 
 MessageType peekNextMessageType(TcpSocket& sock, std::vector<uint8_t>& outRawPayload) {
     outRawPayload = recvFramedMessage(sock);

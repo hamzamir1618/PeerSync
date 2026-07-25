@@ -161,4 +161,27 @@ When a new sync attempt begins for a given file path, `receiveFile` inspects the
 3. **Sender-Side Skipping**: The sender (`sendFile`) receives the `ResumeRequestMessage`, validates that the file size matches its source file, and responds with a positive `ResumeResponseMessage` (`canResume = true`). It then computes the delta instructions against the receiver's provided signatures and iterates through the instruction list, fast-forwarding and skipping the first `lastOffset` instructions without reading local disk blocks or transmitting payload over the wire.
 4. **Resumption & Commit**: The sender resumes transmitting messages from instruction `lastOffset + 1`. The receiver opens `.peersync-tmp` in append/modify mode (`std::ios::ate | std::ios::in | std::ios::out`) and continues applying incoming instructions from its exact previous point of interruption. Once all bytes are received and verified against the expected file hash, `.peersync-tmp` is atomically renamed over `<targetFile>` and `.peersync-journal` is deleted.
 
+## Directory Synchronization & Conflict Resolution
+
+To synchronize entire repository trees, **peersync** implements a high-level `SyncOrchestrator` (`src/core/sync_orchestrator.cpp`) that coordinates manifest exchanges, conflict resolution, and concurrent delta transfers across worker socket pools.
+
+### 1. Recursive Manifest Construction & Exchange
+When initiating a directory synchronization (`syncDirectory`), each peer scans its local directory using `std::filesystem::recursive_directory_iterator`, filtering out temporary and journal artifacts (`.peersync-tmp`, `.peersync-journal`). For each file, a `FileEntry` struct is populated containing its generic relative path, file size in bytes, and last modification timestamp (`mtime` converted to Unix epoch seconds). All manifest entries are sorted lexicographically by relative path to guarantee deterministic lockstep ordering between peers.
+
+The initiator transmits its manifest via a `DirectoryManifestRequestMessage` (MessageType 14). The responder receives the catalog, opens a dedicated TCP listening socket for worker pool transfers (if `maxConcurrency > 0`), and replies with a `DirectoryManifestResponseMessage` (MessageType 15) containing its own sorted file manifest along with the dynamically assigned worker listening port (`workerPort`).
+
+### 2. Two-Stage Cheap Filtering & Conflict Resolution Policy
+To avoid redundant network transmission and signature computations, `SyncOrchestrator::computeSyncPlan` compares corresponding file entries across both manifests using a two-stage filter:
+1. **Identical Cheap Filter**: If a file exists on both peers with the exact same file size and modification timestamp (`mtime`), it is classified as identical and immediately added to the `skipped` plan without opening a transfer session or transmitting data.
+2. **Conflict Resolution Policy (Last-Write-Wins by mtime)**: If a file exists on both peers but differs in size or timestamp, a conflict is detected and recorded in the `conflicts` plan. In bidirectional synchronization mode (`SyncPolicy::Direction::Bidirectional`), conflicts are resolved deterministically using a **Last-Write-Wins** policy based on modification timestamp:
+   - **Local Newer (`loc.mtime > rem.mtime`)**: The local file supersedes the remote file and is scheduled to be pushed (`toSend`).
+   - **Remote Newer (`loc.mtime < rem.mtime`)**: The remote file supersedes the local version and is scheduled to be pulled (`toReceive`).
+   - **Equal Timestamp, Differing Size**: In the rare event of identical timestamps with differing file sizes, the local initiator's version takes precedence in push/bidirectional modes.
+
+### 3. Bounded Concurrency Worker Pool (`executeSync`)
+To maximize throughput without overwhelming network or system resources, transfer operations (`toSend` and `toReceive`) are combined into a single unified task queue sorted by relative path. Because both initiator and responder sort tasks identically, worker threads operate in 100% lockstep across peer socket connections (when Thread $i$ on the initiator executes a push task, Thread $i$ on the responder executes the corresponding pull task).
+
+Transfers execute across a pool of independent worker TCP connections bounded by `SyncPolicy::maxConcurrency` (defaulting to 4 concurrent worker threads). Each worker thread instantiates an independent `TransferSession` over its dedicated socket, applying rsync-style rolling checksum delta transfers and resumable journaling to each assigned file until the synchronization plan is fully satisfied.
+
+
 

@@ -14,6 +14,7 @@ peersync finds another instance of itself on the local network automatically, tr
 - [x] Direct peer-to-peer file transfer without internet connection
 - [x] Resumable transfers for interrupted downloads and uploads
 - [x] Delta synchronization (transfers only changed file parts)
+- [x] Directory synchronization (with Last-Write-Wins conflict resolution by modification timestamp)
 - [ ] Command-line interface (CLI)
 - [ ] Graphical user interface (GUI)
 
@@ -24,6 +25,14 @@ Before any file transfer or directory synchronization can occur between two disc
 1. **PIN Generation & Display**: The device listening for incoming sync requests generates a random 6-digit numeric PIN (e.g., `042918`) and displays it on screen.
 2. **Out-of-Band Entry**: The user on the initiating device is prompted to enter the displayed PIN into their CLI or GUI prompt.
 3. **Cryptographic Handshake**: Both peers independently derive a session key via PBKDF2-HMAC-SHA256 and perform an HMAC challenge-response handshake (`PairChallenge` -> `PairResponse` -> `PairResult`). The PIN itself is never transmitted over the wire.
+
+## Directory Sync & Conflict Policy
+
+When synchronizing entire repository trees, **peersync** exchanges sorted directory manifests and classifies files using a two-stage filter:
+1. **Identical Cheap Filter**: Files with identical size and modification timestamp (`mtime`) are skipped immediately without network IO or signature calculation.
+2. **Conflict Resolution Policy (Last-Write-Wins)**: When files differ in content or timestamp across peers, conflicts are resolved deterministically by comparing modification timestamps:
+   - The version with the **newer modification timestamp** automatically overwrites the older version via rolling-checksum delta transfer.
+   - All transfers within a synchronization session execute concurrently across a bounded pool of worker sockets (defaulting to 4 concurrent worker threads).
 
 
 ## Dependencies

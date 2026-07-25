@@ -22,7 +22,9 @@ enum class MessageType : uint8_t {
     ResumeRequest = 10,
     ResumeResponse = 11,
     TransferComplete = 12,
-    ErrorMessage = 13
+    ErrorMessage = 13,
+    DirectoryManifestRequest = 14,
+    DirectoryManifestResponse = 15
 };
 
 struct HelloMessage {
@@ -102,6 +104,15 @@ struct ErrorMessageMessage {
     std::string errorMessage;
 };
 
+struct DirectoryManifestRequestMessage {
+    std::vector<FileEntry> files;
+};
+
+struct DirectoryManifestResponseMessage {
+    std::vector<FileEntry> files;
+    uint16_t workerPort = 0;
+};
+
 // Inspection and validation
 MessageType getMessageType(const std::vector<uint8_t>& payload);
 
@@ -119,6 +130,8 @@ std::vector<uint8_t> serializeMessage(const ResumeRequestMessage& msg);
 std::vector<uint8_t> serializeMessage(const ResumeResponseMessage& msg);
 std::vector<uint8_t> serializeMessage(const TransferCompleteMessage& msg);
 std::vector<uint8_t> serializeMessage(const ErrorMessageMessage& msg);
+std::vector<uint8_t> serializeMessage(const DirectoryManifestRequestMessage& msg);
+std::vector<uint8_t> serializeMessage(const DirectoryManifestResponseMessage& msg);
 
 // Deserialization functions
 HelloMessage deserializeHelloMessage(const std::vector<uint8_t>& payload);
@@ -134,6 +147,8 @@ ResumeRequestMessage deserializeResumeRequestMessage(const std::vector<uint8_t>&
 ResumeResponseMessage deserializeResumeResponseMessage(const std::vector<uint8_t>& payload);
 TransferCompleteMessage deserializeTransferCompleteMessage(const std::vector<uint8_t>& payload);
 ErrorMessageMessage deserializeErrorMessageMessage(const std::vector<uint8_t>& payload);
+DirectoryManifestRequestMessage deserializeDirectoryManifestRequestMessage(const std::vector<uint8_t>& payload);
+DirectoryManifestResponseMessage deserializeDirectoryManifestResponseMessage(const std::vector<uint8_t>& payload);
 
 // Typed socket messaging layer
 void sendMessage(TcpSocket& sock, const HelloMessage& msg);
@@ -149,6 +164,8 @@ void sendMessage(TcpSocket& sock, const ResumeRequestMessage& msg);
 void sendMessage(TcpSocket& sock, const ResumeResponseMessage& msg);
 void sendMessage(TcpSocket& sock, const TransferCompleteMessage& msg);
 void sendMessage(TcpSocket& sock, const ErrorMessageMessage& msg);
+void sendMessage(TcpSocket& sock, const DirectoryManifestRequestMessage& msg);
+void sendMessage(TcpSocket& sock, const DirectoryManifestResponseMessage& msg);
 
 MessageType peekNextMessageType(TcpSocket& sock, std::vector<uint8_t>& outRawPayload);
 
