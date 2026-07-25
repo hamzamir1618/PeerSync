@@ -9,7 +9,7 @@ peersync finds another instance of itself on the local network automatically, tr
 
 ## Features
 
-- [ ] Automatic local network peer discovery (mDNS / UDP broadcast)
+- [x] Automatic local network peer discovery (mDNS / UDP broadcast)
 - [ ] Direct peer-to-peer file transfer without internet connection
 - [ ] Resumable transfers for interrupted downloads and uploads
 - [ ] Delta synchronization (transfers only changed file parts)

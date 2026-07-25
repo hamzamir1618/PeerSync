@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <atomic>
 #include <thread>
+#include <functional>
+#include <mutex>
 
 namespace peersync {
 namespace discovery {
@@ -38,7 +40,29 @@ std::vector<uint8_t> encodeTxtRecordData(const std::vector<std::string>& records
 // Decodes standard DNS TXT record wire byte format back into a vector of "key=value" strings.
 std::vector<std::string> decodeTxtRecordData(const uint8_t* data, size_t len);
 
+// Holds discovered network peer information
+struct DiscoveredPeer {
+    std::string instanceName;
+    std::string ipAddress;
+    uint16_t port{0};
+    uint64_t lastSeen{0}; // epoch milliseconds or monotonic timestamp
+
+    bool operator==(const DiscoveredPeer& other) const {
+        return instanceName == other.instanceName && ipAddress == other.ipAddress && port == other.port;
+    }
+};
+
+// Pure testable function: parses a raw mDNS response packet byte buffer (e.g. from network or test buffer)
+// into a vector of DiscoveredPeer structs. Safe against malformed or truncated input.
+std::vector<DiscoveredPeer> parseMdnsResponsePacket(const uint8_t* buffer, size_t size);
+
+// Helper function for unit testing: hand-constructs a valid mDNS response byte buffer
+// containing PTR, SRV, and A records for the specified instance, IP, and port.
+std::vector<uint8_t> buildHandConstructedMdnsPacket(const std::string& instance, const std::string& ip, uint16_t port);
+
 } // namespace discovery
+
+using discovery::DiscoveredPeer;
 
 // PeerAdvertiser: Advertises this instance as an mDNS/DNS-SD service of type
 // "_peersync._tcp.local" on a background thread.
@@ -94,6 +118,47 @@ private:
                     int entry, uint16_t query_id, uint16_t rtype,
                     uint16_t rclass, uint32_t ttl, const void* data,
                     size_t size, size_t name_offset, size_t name_length);
+};
+
+// PeerBrowser: Browses for "_peersync._tcp.local" service instances on a background thread.
+class PeerBrowser {
+public:
+    using PeerCallback = std::function<void(const DiscoveredPeer&)>;
+
+    PeerBrowser();
+    ~PeerBrowser();
+
+    // Starts the background browsing thread. Optionally pass a callback invoked whenever a new or updated peer is discovered.
+    bool start(PeerCallback callback = nullptr);
+
+    // Stops the browsing thread and cleanly shuts down without hanging.
+    void stop();
+
+    // Returns a snapshot of all currently discovered peers.
+    std::vector<DiscoveredPeer> getCurrentPeers() const;
+
+    // Clears the list of discovered peers.
+    void clearPeers();
+
+    bool isRunning() const { return m_running; }
+
+    static int responseCallbackStatic(int sock, const struct sockaddr* from, size_t addrlen,
+                                      int entry, uint16_t query_id, uint16_t rtype,
+                                      uint16_t rclass, uint32_t ttl, const void* data,
+                                      size_t size, size_t name_offset, size_t name_length,
+                                      size_t record_offset, size_t record_length, void* user_data);
+
+private:
+    std::atomic<bool> m_running{false};
+    std::thread m_thread;
+    int m_socket{-1};
+    PeerCallback m_callback;
+
+    mutable std::mutex m_peersMutex;
+    std::vector<DiscoveredPeer> m_peers;
+
+    void browserLoop();
+    void sendDiscoveryQuery();
 };
 
 } // namespace peersync

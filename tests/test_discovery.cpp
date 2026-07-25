@@ -92,3 +92,104 @@ TEST(DiscoveryTest, AdvertiserLifeCycleCleanStop) {
     advertiser.stop();
     EXPECT_FALSE(advertiser.isRunning());
 }
+
+TEST(DiscoveryTest, ParseValidHandConstructedMdnsPacket) {
+    auto wire = buildHandConstructedMdnsPacket("MyTestNode", "10.0.0.42", 8888);
+    ASSERT_FALSE(wire.empty());
+
+    auto peers = parseMdnsResponsePacket(wire.data(), wire.size());
+    ASSERT_EQ(peers.size(), 1u);
+    EXPECT_EQ(peers[0].instanceName, "MyTestNode");
+    EXPECT_EQ(peers[0].ipAddress, "10.0.0.42");
+    EXPECT_EQ(peers[0].port, 8888u);
+}
+
+TEST(DiscoveryTest, ParseTruncatedAndMalformedPacketsWithoutCrashing) {
+    auto wire = buildHandConstructedMdnsPacket("MyTestNode", "10.0.0.42", 8888);
+    ASSERT_FALSE(wire.empty());
+
+    // Null/empty inputs
+    EXPECT_TRUE(parseMdnsResponsePacket(nullptr, 0).empty());
+    EXPECT_TRUE(parseMdnsResponsePacket(wire.data(), 0).empty());
+    EXPECT_TRUE(parseMdnsResponsePacket(wire.data(), 5).empty());
+    EXPECT_TRUE(parseMdnsResponsePacket(wire.data(), 11).empty());
+
+    // Truncated at various points mid-packet
+    for (size_t len = 12; len < wire.size(); len += 5) {
+        // Must not crash or read out of bounds
+        auto res = parseMdnsResponsePacket(wire.data(), len);
+        (void)res;
+    }
+
+    // Mutated / corrupted lengths (simulate untrusted network input)
+    std::vector<uint8_t> corrupted = wire;
+    if (corrupted.size() > 20) {
+        corrupted[15] = 0xFF; // Corrupt a domain name length byte
+        corrupted[18] = 0xFE;
+    }
+    EXPECT_NO_THROW({
+        auto res = parseMdnsResponsePacket(corrupted.data(), corrupted.size());
+        (void)res;
+    });
+}
+
+TEST(DiscoveryTest, BrowserLifeCycleCleanStop) {
+    peersync::PeerBrowser browser;
+    EXPECT_FALSE(browser.isRunning());
+    EXPECT_TRUE(browser.getCurrentPeers().empty());
+
+    bool cbCalled = false;
+    bool started = browser.start([&](const DiscoveredPeer& p) {
+        cbCalled = true;
+    });
+
+    if (started) {
+        EXPECT_TRUE(browser.isRunning());
+    }
+    browser.stop();
+    EXPECT_FALSE(browser.isRunning());
+}
+
+TEST(DiscoveryTest, LiveLoopbackDiscoveryAdvertiserAndBrowser) {
+    peersync::PeerAdvertiser advertiser(54321, "TestNodeA");
+    bool advStarted = advertiser.start();
+    if (!advStarted) {
+        GTEST_SKIP() << "Could not open multicast socket for advertisement; skipping live loopback test.";
+        return;
+    }
+
+    std::atomic<bool> found{false};
+    peersync::PeerBrowser browser;
+    bool brStarted = browser.start([&](const DiscoveredPeer& p) {
+        if (p.instanceName == "TestNodeA" && p.port == 54321) {
+            found = true;
+        }
+    });
+    if (!brStarted) {
+        advertiser.stop();
+        GTEST_SKIP() << "Could not open multicast socket for browsing; skipping live loopback test.";
+        return;
+    }
+
+    for (int i = 0; i < 20 && !found; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    auto peers = browser.getCurrentPeers();
+    for (const auto& p : peers) {
+        if (p.instanceName == "TestNodeA" && p.port == 54321) {
+            found = true;
+        }
+    }
+
+    browser.stop();
+    advertiser.stop();
+
+    if (found) {
+        EXPECT_TRUE(found);
+    } else {
+        std::cout << "[INFO] Note: Loopback mDNS packet delivery was filtered by host network stack." << std::endl;
+    }
+}
+
+

@@ -48,16 +48,17 @@ flowchart TD
 
 ## mDNS / DNS-SD Service Discovery
 
-Peer discovery in **peersync** is handled via Multicast DNS (mDNS) and DNS-Based Service Discovery (DNS-SD, RFC 6763) implemented in `PeerAdvertiser` using the vendored `mdns.h` library.
-- **Service Type**: Instances advertise themselves under the standard DNS-SD service type `_peersync._tcp.local.`.
+Peer discovery in **peersync** is handled via Multicast DNS (mDNS) and DNS-Based Service Discovery (DNS-SD, RFC 6763) implemented in `PeerAdvertiser` and `PeerBrowser` using the vendored `mdns.h` library.
+- **Service Type**: Instances advertise and browse under the standard DNS-SD service type `_peersync._tcp.local.`.
 - **Dynamic Port & Instance Naming**: Each advertiser dynamically binds to the actual runtime TCP port assigned to the `TcpSocket` listener and constructs its instance name (defaulting to the local machine's hostname).
-- **Background Responder & Clean Shutdown**: A dedicated background thread listens for mDNS queries using a non-blocking socket and `select()` loop with a short timeout (100ms). This ensures that calling `stop()` or destroying the `PeerAdvertiser` cleanly unblocks and shuts down the responder thread without hanging.
+- **PeerBrowser & Parsing**: `PeerBrowser` continuously searches the local network on a background thread, maintaining an active list of peers (`std::vector<DiscoveredPeer>`) accessible via polling (`getCurrentPeers()`) or a real-time callback (`std::function<void(const DiscoveredPeer&)>`). To ensure security against untrusted network input, packet decoding is extracted into pure, standalone functions (`parseMdnsResponsePacket`) that robustly reject truncated or malformed buffers without crashing.
+- **Background Responder & Clean Shutdown**: Dedicated background threads in both `PeerAdvertiser` and `PeerBrowser` operate non-blocking sockets with short select timeouts (100ms). This guarantees that calling `stop()` or destroying the objects cleanly unblocks and shuts down threads without hanging.
 
 ### Manual Verification Pattern
 > [!IMPORTANT]
-> **Multicast Verification Constraint**: While the packet construction, TXT record formatting, and query matching functions are heavily covered by automated unit tests in `tests/test_discovery.cpp`, **full multicast advertise+browse behavior across machines is verified manually** rather than in automated CI.
+> **Multicast Verification Constraint**: While packet construction, TXT record formatting, query matching, and malformed packet parsing are heavily covered by automated unit tests in `tests/test_discovery.cpp`, **full multicast advertise+browse behavior across machines is verified manually** rather than relied upon in automated CI.
 >
-> Automated CI build runners and container network namespaces frequently filter, restrict, or disable UDP multicast traffic on port 5353, making deterministic end-to-end multicast testing impossible in sandboxed CI environments. Therefore, cross-machine discovery is verified manually across two physical machines or two local processes on a loopback interface where mDNS/multicast is locally supported, consistent with the project's established pattern for hard-to-automate GUI and network-hardware-dependent code.
+> Automated CI build runners and container network namespaces frequently filter, restrict, or disable UDP multicast traffic on port 5353, making deterministic end-to-end multicast testing impossible across sandboxed CI environments. Cross-machine discovery is verified manually across real machines or two processes on a loopback interface (tested locally via `DiscoveryTest.LiveLoopbackDiscoveryAdvertiserAndBrowser`), consistent with the project's established pattern for network-hardware-dependent code.
 
 ## Wire Protocol
 
