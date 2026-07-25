@@ -15,7 +15,7 @@ peersync finds another instance of itself on the local network automatically, tr
 - [x] Resumable transfers for interrupted downloads and uploads
 - [x] Delta synchronization (transfers only changed file parts)
 - [x] Directory synchronization (with Last-Write-Wins conflict resolution by modification timestamp)
-- [ ] Command-line interface (CLI)
+- [x] Command-line interface (CLI)
 - [ ] Graphical user interface (GUI)
 
 ## How Pairing Works
@@ -33,6 +33,43 @@ When synchronizing entire repository trees, **peersync** exchanges sorted direct
 2. **Conflict Resolution Policy (Last-Write-Wins)**: When files differ in content or timestamp across peers, conflicts are resolved deterministically by comparing modification timestamps:
    - The version with the **newer modification timestamp** automatically overwrites the older version via rolling-checksum delta transfer.
    - All transfers within a synchronization session execute concurrently across a bounded pool of worker sockets (defaulting to 4 concurrent worker threads).
+
+
+## CLI Usage Examples
+
+The `peersync` command-line interface provides intuitive subcommands for local network peer discovery and synchronization.
+
+### 1. Listen for Peers (`listen`)
+Start an mDNS service advertiser and TCP listener on a specified device name and port. If `--name` is omitted, the local machine's hostname is used. If `--port 0` is specified, an ephemeral port is assigned automatically.
+
+```bash
+# Listen with a custom device name on an ephemeral port
+peersync listen --name my-laptop --port 0
+```
+**Sample Output:**
+```
+Listening as my-laptop on port 54321, waiting for peers...
+```
+Pressing `Ctrl+C` cleanly shuts down the mDNS service announcement and listening socket without hanging or killing the process abruptly.
+
+### 2. Discover Peers (`discover`)
+Search the local network for advertised `peersync` instances over mDNS/DNS-SD for a specified timeout duration (defaulting to 3 seconds).
+
+```bash
+# Browse for local peers for 5 seconds
+peersync discover --timeout 5
+```
+**Sample Output:**
+```
+Browsing for peers for 5 seconds...
+
+Discovered Peers:
+Name                            IP Address          Port      
+--------------------------------------------------------------
+my-laptop                       192.168.1.50        54321     
+desktop-workstation             192.168.1.102       48192     
+--------------------------------------------------------------
+```
 
 
 ## Dependencies
