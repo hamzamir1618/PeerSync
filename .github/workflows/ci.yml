@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+# NOTE FOR FUTURE NETWORKING / SOCKET-BASED TESTS (Starting Phase 2):
+# All socket-based tests MUST bind exclusively to the loopback interface (127.0.0.1)
+# and use OS-assigned ephemeral ports (bind to port 0, then read back the assigned port)
+# rather than using fixed port numbers. CI runners may enforce networking/port
+# restrictions or execute tests concurrently, which will cause flaky test failures or
+# binding collisions if hardcoded port numbers are used.
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache FetchContent / _deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: ${{ runner.os }}-deps-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-
+
+      - name: Configure CMake
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DPEERSYNC_BUILD_TESTS=ON
+          -DPEERSYNC_BUILD_GUI=OFF
+
+      - name: Build Project
+        run: cmake --build build --config Release
+
+      - name: Run Tests
+        run: ctest --test-dir build --output-on-failure -C Release

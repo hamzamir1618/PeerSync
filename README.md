@@ -1,5 +1,8 @@
 # peersync
 
+[![CI](https://github.com/<owner>/<repo>/actions/workflows/ci.yml/badge.svg)](https://github.com/<owner>/<repo>/actions/workflows/ci.yml)
+<!-- NOTE: Replace <owner>/<repo> in the badge URL above with your actual GitHub username and repository name -->
+
 > **Status: early development**
 
 peersync finds another instance of itself on the local network automatically, transfers files directly with no internet, resumes interrupted transfers, and sends only the changed parts of a file.
