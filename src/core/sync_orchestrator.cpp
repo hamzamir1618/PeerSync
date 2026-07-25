@@ -184,14 +184,15 @@ bool SyncOrchestrator::executeSync(const std::filesystem::path& localDir, const 
 
     struct TransferTask {
         std::string relativePath;
+        uint64_t fileSize;
         bool isSending;
     };
     std::vector<TransferTask> tasks;
     for (const auto& f : plan.toSend) {
-        tasks.push_back({f.relativePath, true});
+        tasks.push_back({f.relativePath, f.fileSize, true});
     }
     for (const auto& f : plan.toReceive) {
-        tasks.push_back({f.relativePath, false});
+        tasks.push_back({f.relativePath, f.fileSize, false});
     }
     std::sort(tasks.begin(), tasks.end(), [](const TransferTask& a, const TransferTask& b) {
         return a.relativePath < b.relativePath;
@@ -227,8 +228,15 @@ bool SyncOrchestrator::executeSync(const std::filesystem::path& localDir, const 
     if (workerSockets.size() < K) {
         workerSockets.clear();
         TransferSession session(m_controlSocket, m_policy.transferConfig);
+        std::atomic<size_t> startedTasks{0};
+        std::atomic<size_t> completedTasks{0};
         for (const auto& task : tasks) {
             recordActiveTransferStart();
+            uint64_t startBytes = task.isSending ? session.getBytesSent() : session.getBytesReceived();
+            size_t startIdx = ++startedTasks;
+            if (m_policy.onFileStart) {
+                m_policy.onFileStart(task.relativePath, startIdx, tasks.size(), task.isSending);
+            }
             bool res = false;
             if (task.isSending) {
                 res = session.sendFile(localDir / task.relativePath, task.relativePath);
@@ -236,6 +244,12 @@ bool SyncOrchestrator::executeSync(const std::filesystem::path& localDir, const 
             } else {
                 res = session.receiveFile(localDir);
                 if (res) m_filesReceived++;
+            }
+            uint64_t endBytes = task.isSending ? session.getBytesSent() : session.getBytesReceived();
+            uint64_t fileTransferredBytes = (endBytes >= startBytes) ? (endBytes - startBytes) : endBytes;
+            size_t compIdx = ++completedTasks;
+            if (m_policy.onFileComplete) {
+                m_policy.onFileComplete(task.relativePath, compIdx, tasks.size(), fileTransferredBytes, task.fileSize, task.isSending);
             }
             recordActiveTransferEnd();
             if (!res) return false;
@@ -245,15 +259,22 @@ bool SyncOrchestrator::executeSync(const std::filesystem::path& localDir, const 
 
     std::vector<std::thread> workers;
     std::atomic<bool> overallSuccess{true};
+    std::atomic<size_t> startedTasks{0};
+    std::atomic<size_t> completedTasks{0};
 
     for (size_t workerIdx = 0; workerIdx < workerSockets.size(); ++workerIdx) {
-        workers.emplace_back([this, workerIdx, K = workerSockets.size(), &tasks, &workerSockets, &localDir, &overallSuccess]() {
+        workers.emplace_back([this, workerIdx, K = workerSockets.size(), &tasks, &workerSockets, &localDir, &overallSuccess, &startedTasks, &completedTasks]() {
             try {
                 TransferSession session(*workerSockets[workerIdx], m_policy.transferConfig);
                 for (size_t j = workerIdx; j < tasks.size(); j += K) {
                     if (!overallSuccess.load()) break;
                     const auto& task = tasks[j];
                     recordActiveTransferStart();
+                    uint64_t startBytes = task.isSending ? session.getBytesSent() : session.getBytesReceived();
+                    size_t startIdx = ++startedTasks;
+                    if (m_policy.onFileStart) {
+                        m_policy.onFileStart(task.relativePath, startIdx, tasks.size(), task.isSending);
+                    }
                     bool res = false;
                     if (task.isSending) {
                         res = session.sendFile(localDir / task.relativePath, task.relativePath);
@@ -261,6 +282,12 @@ bool SyncOrchestrator::executeSync(const std::filesystem::path& localDir, const 
                     } else {
                         res = session.receiveFile(localDir);
                         if (res) m_filesReceived++;
+                    }
+                    uint64_t endBytes = task.isSending ? session.getBytesSent() : session.getBytesReceived();
+                    uint64_t fileTransferredBytes = (endBytes >= startBytes) ? (endBytes - startBytes) : endBytes;
+                    size_t compIdx = ++completedTasks;
+                    if (m_policy.onFileComplete) {
+                        m_policy.onFileComplete(task.relativePath, compIdx, tasks.size(), fileTransferredBytes, task.fileSize, task.isSending);
                     }
                     recordActiveTransferEnd();
                     if (!res) {

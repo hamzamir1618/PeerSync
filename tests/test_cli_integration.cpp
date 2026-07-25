@@ -492,3 +492,152 @@ TEST(CliIntegrationTest, SendReceiveFailureWithWrongPin) {
     std::filesystem::remove_all(tempDir, ec);
 #endif
 }
+
+TEST(CliIntegrationTest, DirectorySyncInitialAndIncrementalResync) {
+#ifndef PEERSYNC_CLI_PATH
+    FAIL() << "PEERSYNC_CLI_PATH not defined";
+#else
+    std::string path = PEERSYNC_CLI_PATH;
+#ifdef _WIN32
+    for (char& c : path) {
+        if (c == '/') c = '\\';
+    }
+#endif
+    std::string cliExe = std::string("\"") + path + "\"";
+    uint16_t port = getFreeLoopbackPort();
+
+    std::error_code ec;
+    std::filesystem::path tempDir = std::filesystem::temp_directory_path() / ("peersync_cli_test_dirsync_" + std::to_string(port));
+    std::filesystem::remove_all(tempDir, ec);
+    std::filesystem::create_directories(tempDir, ec);
+    std::filesystem::path srcDir = tempDir / "src";
+    std::filesystem::path dstDir = tempDir / "dst";
+    std::filesystem::create_directories(srcDir, ec);
+    std::filesystem::create_directories(dstDir, ec);
+
+    // Create several initial files
+    {
+        std::ofstream ofs1(srcDir / "file1.txt");
+        for (int i = 0; i < 100; ++i) ofs1 << "File 1 initial content line " << i << "\n";
+        std::ofstream ofs2(srcDir / "file2.dat", std::ios::binary);
+        for (int i = 0; i < 500; ++i) ofs2 << "File 2 binary data block number " << i << " payload text.\n";
+        std::ofstream ofs3(srcDir / "file3.log");
+        ofs3 << "Log file initial line.\n";
+    }
+
+    // --- First full directory sync ---
+    std::string recvCmd1 = cliExe + " receive-dir --port " + std::to_string(port) + " --accept-dir \"" + dstDir.string() + "\"";
+    auto recvProc1 = Subprocess::launch(recvCmd1, true, true);
+    ASSERT_TRUE(recvProc1.valid) << "Failed to launch receive-dir process";
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    std::string syncCmd1 = cliExe + " sync \"" + srcDir.string() + "\" --to 127.0.0.1:" + std::to_string(port);
+    auto syncProc1 = Subprocess::launch(syncCmd1, true, false);
+    ASSERT_TRUE(syncProc1.valid) << "Failed to launch sync process";
+
+    std::string sendOut1 = syncProc1.readUntil("device: ", 5000);
+    auto pinPos1 = sendOut1.find("device: ");
+    ASSERT_NE(pinPos1, std::string::npos) << "Could not find PIN prompt in sender output:\n" << sendOut1;
+
+    std::string pinStr1 = sendOut1.substr(pinPos1 + 8);
+    std::string pin1;
+    for (char c : pinStr1) {
+        if (std::isdigit(c)) pin1 += c;
+        if (pin1.length() == 6) break;
+    }
+    ASSERT_EQ(pin1.length(), 6) << "Extracted invalid PIN: " << pinStr1;
+
+    recvProc1.sendInput(pin1 + "\n");
+    recvProc1.closeInput();
+
+    std::string finalSendOut1 = syncProc1.readOutput();
+    std::string finalRecvOut1 = recvProc1.readOutput();
+
+    syncProc1.terminate();
+    recvProc1.terminate();
+
+    EXPECT_NE(finalSendOut1.find("Directory sync complete!"), std::string::npos) << "First sync sender failed:\n" << finalSendOut1;
+    EXPECT_NE(finalRecvOut1.find("Directory sync complete!"), std::string::npos) << "First sync receiver failed:\n" << finalRecvOut1;
+
+    ASSERT_TRUE(std::filesystem::exists(dstDir / "file1.txt", ec));
+    ASSERT_TRUE(std::filesystem::exists(dstDir / "file2.dat", ec));
+    ASSERT_TRUE(std::filesystem::exists(dstDir / "file3.log", ec));
+    EXPECT_EQ(std::filesystem::file_size(srcDir / "file1.txt", ec), std::filesystem::file_size(dstDir / "file1.txt", ec));
+    EXPECT_EQ(std::filesystem::file_size(srcDir / "file2.dat", ec), std::filesystem::file_size(dstDir / "file2.dat", ec));
+    EXPECT_EQ(std::filesystem::file_size(srcDir / "file3.log", ec), std::filesystem::file_size(dstDir / "file3.log", ec));
+
+    // Check first sync savings percentage (should be ~0% since all files are fresh)
+    auto savedPos1 = finalSendOut1.find("% saved via delta sync");
+    ASSERT_NE(savedPos1, std::string::npos) << "Could not find savings report in first sync:\n" << finalSendOut1;
+    auto parenPos1 = finalSendOut1.rfind('(', savedPos1);
+    ASSERT_NE(parenPos1, std::string::npos);
+    double savedPct1 = std::stod(finalSendOut1.substr(parenPos1 + 1, savedPos1 - (parenPos1 + 1)));
+    EXPECT_LT(savedPct1, 10.0) << "Expected minimal savings on initial full sync, got " << savedPct1 << "%";
+
+    // --- Second incremental resync ---
+    // Ensure mtime advances so modified file is detected by mtime/size check
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    // Modify only file2.dat slightly (change one line in middle)
+    {
+        std::ofstream ofs2(srcDir / "file2.dat", std::ios::in | std::ios::out | std::ios::binary);
+        ofs2.seekp(100);
+        ofs2 << "MODIFIED";
+    }
+
+    uint16_t port2 = getFreeLoopbackPort();
+    std::string recvCmd2 = cliExe + " receive-dir --port " + std::to_string(port2) + " --accept-dir \"" + dstDir.string() + "\"";
+    auto recvProc2 = Subprocess::launch(recvCmd2, true, true);
+    ASSERT_TRUE(recvProc2.valid) << "Failed to launch second receive-dir process";
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    std::string syncCmd2 = cliExe + " sync \"" + srcDir.string() + "\" --to 127.0.0.1:" + std::to_string(port2);
+    auto syncProc2 = Subprocess::launch(syncCmd2, true, false);
+    ASSERT_TRUE(syncProc2.valid) << "Failed to launch second sync process";
+
+    std::string sendOut2 = syncProc2.readUntil("device: ", 5000);
+    auto pinPos2 = sendOut2.find("device: ");
+    ASSERT_NE(pinPos2, std::string::npos) << "Could not find PIN prompt in second sender output:\n" << sendOut2;
+
+    std::string pinStr2 = sendOut2.substr(pinPos2 + 8);
+    std::string pin2;
+    for (char c : pinStr2) {
+        if (std::isdigit(c)) pin2 += c;
+        if (pin2.length() == 6) break;
+    }
+    ASSERT_EQ(pin2.length(), 6);
+
+    recvProc2.sendInput(pin2 + "\n");
+    recvProc2.closeInput();
+
+    std::string finalSendOut2 = syncProc2.readOutput();
+    std::string finalRecvOut2 = recvProc2.readOutput();
+
+    syncProc2.terminate();
+    recvProc2.terminate();
+
+    EXPECT_NE(finalSendOut2.find("Directory sync complete!"), std::string::npos) << "Second sync sender failed:\n" << finalSendOut2;
+
+    // Verify reported byte savings on incremental resync
+    auto savedPos2 = finalSendOut2.find("% saved via delta sync");
+    ASSERT_NE(savedPos2, std::string::npos) << "Could not find savings report in second sync:\n" << finalSendOut2;
+    auto parenPos2 = finalSendOut2.rfind('(', savedPos2);
+    ASSERT_NE(parenPos2, std::string::npos);
+    double savedPct2 = std::stod(finalSendOut2.substr(parenPos2 + 1, savedPos2 - (parenPos2 + 1)));
+    EXPECT_GT(savedPct2, 50.0) << "Expected meaningful delta savings (>50%) on incremental resync, got " << savedPct2 << "%";
+    EXPECT_GT(savedPct2, savedPct1) << "Incremental sync did not achieve higher savings than initial sync";
+
+    // Verify modified file matched in destination
+    {
+        std::ifstream ifs(dstDir / "file2.dat", std::ios::binary);
+        char buf[9] = {0};
+        ifs.seekg(100);
+        ifs.read(buf, 8);
+        EXPECT_STREQ(buf, "MODIFIED") << "Incremental sync did not properly update file2.dat";
+    }
+
+    std::filesystem::remove_all(tempDir, ec);
+#endif
+}

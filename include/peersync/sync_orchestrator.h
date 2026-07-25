@@ -6,6 +6,7 @@
 #include <string>
 #include <memory>
 #include <atomic>
+#include <functional>
 #include <peersync/protocol.h>
 #include <peersync/socket.h>
 #include <peersync/transfer.h>
@@ -21,6 +22,8 @@ struct SyncPolicy {
     Direction direction = Direction::Bidirectional;
     size_t maxConcurrency = 4; // Max concurrent TransferSessions
     TransferSession::Config transferConfig{};
+    std::function<void(const std::string& relPath, size_t fileIndex, size_t totalFiles, bool isSending)> onFileStart = nullptr;
+    std::function<void(const std::string& relPath, size_t fileIndex, size_t totalFiles, uint64_t bytesTransferred, uint64_t fileSize, bool isSending)> onFileComplete = nullptr;
 };
 
 struct SyncPlan {

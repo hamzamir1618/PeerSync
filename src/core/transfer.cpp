@@ -483,6 +483,9 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
 
                 TransferAckMessage ackMsg{relativePath, totalBytesApplied};
                 sendMsg(serializeMessage(ackMsg));
+                if (m_config.progressCallback) {
+                    m_config.progressCallback(m_bytesReceived, totalBytesApplied, expectedFileSize);
+                }
 
                 journal.lastSeq = totalInstructionsApplied;
                 saveJournal(journalPath, journal);
