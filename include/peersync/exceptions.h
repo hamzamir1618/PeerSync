@@ -21,6 +21,12 @@ public:
         : std::runtime_error(message) {}
 };
 
+class PeerSyncDeltaException : public std::runtime_error {
+public:
+    explicit PeerSyncDeltaException(const std::string& message)
+        : std::runtime_error(message) {}
+};
+
 } // namespace peersync
 
 #endif // PEERSYNC_EXCEPTIONS_H
