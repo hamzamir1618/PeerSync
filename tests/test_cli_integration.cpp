@@ -730,7 +730,7 @@ TEST(CliIntegrationTest, ResumptionAfterInterruption) {
                 }
             }
             auto sz = std::filesystem::file_size(tPath, ec);
-            if (!ec && ((bytesApplied >= 256 * 1024 && bytesApplied < 48 * 1024 * 1024) || (sz >= 256 * 1024 && sz < 48 * 1024 * 1024))) {
+            if (!ec && bytesApplied >= 256 * 1024 && bytesApplied < 48 * 1024 * 1024 && sz >= bytesApplied) {
                 sendProc1.interrupt();
                 recvProc1.interrupt();
                 sendProc1.terminate();

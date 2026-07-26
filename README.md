@@ -16,7 +16,7 @@ peersync finds another instance of itself on the local network automatically, tr
 - [x] Delta synchronization (transfers only changed file parts)
 - [x] Directory synchronization (with Last-Write-Wins conflict resolution by modification timestamp)
 - [x] Command-line interface (CLI)
-- [ ] Graphical user interface (GUI)
+- [x] Graphical user interface (GUI)
 
 ## How Pairing Works
 
@@ -101,6 +101,29 @@ If a deliberately wrong PIN is entered on the receiving side, cryptographic pair
 > [!TIP]
 > **Interrupted transfer? Just run the same command again!**  
 > `peersync` automatically maintains a `.peersync-journal` file and temporary transfer state during active transfers. If a network drop, power outage, or `Ctrl+C` interrupts an ongoing file upload or directory sync, simply re-running the exact same `send` or `sync` command will detect the incomplete transfer and seamlessly resume from where it left off (e.g., `"Found incomplete transfer for backup.tar, resuming from 45%..."`). You can also pass `--no-resume` if you prefer to discard previous progress and force a fresh transfer from scratch.
+
+## GUI Usage & Workflow
+
+The graphical user interface (`peersync-gui`) provides a sleek, immediate-mode desktop experience built with Dear ImGui, GLFW, and native OS file dialogs via `tinyfiledialogs`.
+
+### Launching the Application
+Run `peersync-gui` from your terminal or desktop shortcut. The application automatically starts scanning your local subnet using mDNS/DNS-SD and populates the **Discovered Peers** table in real time.
+
+### Initiating a Transfer (Send / Directory Sync)
+1. Click the **Connect** button on any discovered peer in the list.
+2. The **Connect & Transfer** modal opens in Initiator mode, generating a random 6-digit **Secure Pairing PIN** (e.g., `849201`).
+3. Tell the person on the receiving device this PIN.
+4. Click **Browse File...** or **Browse Folder...** to open your native operating system file picker and choose what to send.
+5. Click **Start Connection & Transfer**. The UI transitions to the active transfer view, displaying a real-time progress bar, byte transfer counters, and live **Delta Savings** statistics.
+
+### Receiving Data (Listen & Accept)
+1. Click the **Receive / Accept** button in the top header toolbar.
+2. The modal opens in Responder mode, listening for incoming peer connections.
+3. Enter the 6-digit PIN displayed on the initiating device.
+4. Click **Browse Accept Folder...** to pick where incoming files or synced directories should be saved.
+5. Click **Start Listening & Pairing** to authenticate the peer and receive data.
+
+<!-- NOTE: Place GUI screenshots in docs/screenshots/ once visual assets are generated (e.g. main_window.png, connect_modal.png, active_transfer.png). -->
 
 ## Dependencies
 
