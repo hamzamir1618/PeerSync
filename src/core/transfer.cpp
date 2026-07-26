@@ -16,6 +16,7 @@ struct JournalEntry {
     uint64_t expectedSize = 0;
     std::string sigHash;
     uint64_t lastSeq = 0;
+    uint64_t bytesApplied = 0;
 };
 
 std::string computeSignatureListHash(const std::vector<peersync::BlockSignature>& sigs) {
@@ -43,6 +44,7 @@ bool saveJournal(const std::filesystem::path& journalPath, const JournalEntry& e
     ofs << "expected_size=" << entry.expectedSize << "\n";
     ofs << "sig_hash=" << entry.sigHash << "\n";
     ofs << "last_seq=" << entry.lastSeq << "\n";
+    ofs << "bytes_applied=" << entry.bytesApplied << "\n";
     return true;
 }
 
@@ -61,6 +63,7 @@ bool loadJournal(const std::filesystem::path& journalPath, JournalEntry& entry) 
         else if (key == "expected_size") entry.expectedSize = std::stoull(val);
         else if (key == "sig_hash") entry.sigHash = val;
         else if (key == "last_seq") entry.lastSeq = std::stoull(val);
+        else if (key == "bytes_applied") entry.bytesApplied = std::stoull(val);
     }
     return !entry.relativePath.empty();
 }
@@ -164,7 +167,7 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
             expectedSize = std::stoull(resReq.fileHash);
         } catch (...) {}
 
-        if (fileSize == expectedSize) {
+        if (m_config.allowResume && fileSize == expectedSize) {
             ResumeResponseMessage resResp{relativePath, true, resReq.lastOffset};
             sendMsg(serializeMessage(resResp));
             peerSignatures = std::move(resReq.signatures);
@@ -189,8 +192,22 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
     // 3. Compute delta instructions against peer's signatures
     auto delta = computeDelta(localFile, peerSignatures, m_config.blockSize);
 
+    if (m_config.onResumeDetected) {
+        uint64_t resumedBytes = 0;
+        if (isResuming) {
+            uint64_t idx = 0;
+            for (const auto& inst : delta) {
+                if (idx++ >= resumeOffset) break;
+                resumedBytes += (inst.type == DeltaInstructionType::Literal) ? inst.bytes.size() : m_config.blockSize;
+            }
+            if (resumedBytes > fileSize) resumedBytes = fileSize;
+        }
+        m_config.onResumeDetected(relativePath, isResuming, resumedBytes, fileSize);
+    }
+
     // 4. Send instructions in chunks, extracting large literals as BlockData messages
     std::vector<DeltaInstruction> currentBatch;
+    size_t currentBatchBytes = 0;
     uint64_t blockDataSeq = 1; // Sequence 1-indexed for BlockData references
     uint64_t instIndex = 0;
     uint64_t fileBytesProcessed = 0;
@@ -203,11 +220,12 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
         DeltaInstructionsMessage deltaMsg{relativePath, fileSize, static_cast<uint32_t>(m_config.blockSize), currentBatch};
         sendMsg(serializeMessage(deltaMsg));
         currentBatch.clear();
+        currentBatchBytes = 0;
 
         // Wait for TransferAck
         auto ackPayload = recvMsg();
         if (getMessageType(ackPayload) != MessageType::TransferAck) {
-            throw PeerSyncProtocolException("Expected TransferAck message after sending instructions");
+            throw PeerSyncProtocolException("Expected TransferAck message after sending instructions, got type " + std::to_string(static_cast<int>(getMessageType(ackPayload))));
         }
         auto ackMsg = deserializeTransferAckMessage(ackPayload);
         (void)ackMsg; // ACK confirmed by receiver
@@ -228,6 +246,7 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
         }
         instIndex++;
         fileBytesProcessed += instLen;
+        currentBatchBytes += instLen;
 
         if (inst.type == DeltaInstructionType::Literal && inst.bytes.size() > m_config.literalThreshold) {
             // Send BlockData message first
@@ -247,7 +266,7 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
             currentBatch.push_back(inst);
         }
 
-        if (currentBatch.size() >= m_config.maxInstructionsPerMessage) {
+        if (currentBatch.size() >= m_config.maxInstructionsPerMessage || currentBatchBytes >= 512 * 1024) {
             sendCurrentBatch();
         }
     }
@@ -305,8 +324,8 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
     std::string currentSigHash = computeSignatureListHash(sigs);
     JournalEntry journal;
     bool isResuming = false;
-    if (loadJournal(journalPath, journal) && std::filesystem::exists(tempPath, ec)) {
-        if (journal.relativePath == relativePath && journal.sigHash == currentSigHash && std::filesystem::file_size(tempPath, ec) <= journal.expectedSize) {
+    if (m_config.allowResume && loadJournal(journalPath, journal) && std::filesystem::exists(tempPath, ec)) {
+        if (journal.relativePath == relativePath && journal.sigHash == currentSigHash && journal.bytesApplied <= journal.expectedSize && std::filesystem::file_size(tempPath, ec) >= journal.bytesApplied) {
             isResuming = true;
         } else {
             deleteJournalAndTemp(targetFile);
@@ -384,14 +403,22 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
     std::unordered_map<uint64_t, std::vector<uint8_t>> receivedBlockData;
 
     if (isResuming) {
+        std::error_code resizeEc;
+        std::filesystem::resize_file(tempPath, journal.bytesApplied, resizeEc);
+        if (resizeEc) {
+            throw PeerSyncProtocolException("Failed to truncate temp file to committed boundary: " + resizeEc.message());
+        }
         ofs.open(tempPath, std::ios::binary | std::ios::in | std::ios::out | std::ios::ate);
         if (!ofs.is_open()) {
             throw PeerSyncProtocolException("Failed to open temp file for resuming: " + tempPath.string());
         }
-        totalBytesApplied = std::filesystem::file_size(tempPath, ec);
+        totalBytesApplied = journal.bytesApplied;
         totalInstructionsApplied = journal.lastSeq;
         expectedFileSize = journal.expectedSize;
         receivedAtLeastOneDeltaMsg = true;
+        if (m_config.onResumeDetected) {
+            m_config.onResumeDetected(relativePath, true, totalBytesApplied, expectedFileSize);
+        }
     } else {
         deleteJournalAndTemp(targetFile);
         ofs.open(tempPath, std::ios::binary | std::ios::out | std::ios::trunc);
@@ -416,11 +443,16 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
 
             if (type == MessageType::DeltaInstructions) {
                 auto deltaMsg = deserializeDeltaInstructionsMessage(payload);
+                bool isFirstDelta = !receivedAtLeastOneDeltaMsg;
                 receivedAtLeastOneDeltaMsg = true;
                 expectedFileSize = deltaMsg.targetFileSize;
+                if (!isResuming && isFirstDelta && m_config.onResumeDetected) {
+                    m_config.onResumeDetected(relativePath, false, 0, expectedFileSize);
+                }
                 if (!isResuming) {
                     journal.expectedSize = expectedFileSize;
                     journal.lastSeq = 0;
+                    journal.bytesApplied = 0;
                     saveJournal(journalPath, journal);
                 }
                 if (deltaMsg.blockSize > 0) {
@@ -488,6 +520,8 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
                 }
 
                 journal.lastSeq = totalInstructionsApplied;
+                journal.bytesApplied = totalBytesApplied;
+                ofs.flush();
                 saveJournal(journalPath, journal);
 
                 if (receivedAtLeastOneDeltaMsg && totalBytesApplied == expectedFileSize) {
@@ -540,7 +574,7 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
 
     auto replyPayload = recvMsg();
     if (getMessageType(replyPayload) != MessageType::TransferComplete) {
-        throw PeerSyncProtocolException("Expected TransferComplete reply from sender");
+        throw PeerSyncProtocolException("Expected TransferComplete reply from sender, got type " + std::to_string(static_cast<int>(getMessageType(replyPayload))));
     }
     auto replyMsg = deserializeTransferCompleteMessage(replyPayload);
     if (!replyMsg.success || replyMsg.finalHash != finalHash) {

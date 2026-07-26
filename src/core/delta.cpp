@@ -159,6 +159,10 @@ std::vector<DeltaInstruction> computeDelta(const std::filesystem::path& newFile,
 
         if (!matched) {
             pendingLiteral.push_back(fileData[i]);
+            if (pendingLiteral.size() >= std::max<size_t>(65536, blockSize)) {
+                instructions.push_back(DeltaInstruction::Literal(std::move(pendingLiteral)));
+                pendingLiteral.clear();
+            }
             if (i + blockSize < fileData.size()) {
                 currentWeak = rollAdler32(currentWeak, fileData[i], fileData[i + blockSize], blockSize);
                 i++;

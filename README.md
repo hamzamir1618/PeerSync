@@ -98,6 +98,9 @@ Sent 2.1 MB of 500.0 MB file (99.6% saved via delta sync)
 
 If a deliberately wrong PIN is entered on the receiving side, cryptographic pairing fails cleanly with an explicit error message on both devices, and no file data is ever transmitted or partially written to disk.
 
+> [!TIP]
+> **Interrupted transfer? Just run the same command again!**  
+> `peersync` automatically maintains a `.peersync-journal` file and temporary transfer state during active transfers. If a network drop, power outage, or `Ctrl+C` interrupts an ongoing file upload or directory sync, simply re-running the exact same `send` or `sync` command will detect the incomplete transfer and seamlessly resume from where it left off (e.g., `"Found incomplete transfer for backup.tar, resuming from 45%..."`). You can also pass `--no-resume` if you prefer to discard previous progress and force a fresh transfer from scratch.
 
 ## Dependencies
 

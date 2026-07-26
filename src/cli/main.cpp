@@ -139,7 +139,7 @@ static std::string formatBytes(uint64_t bytes) {
     return oss.str();
 }
 
-int runSend(const std::string& filePath, const std::string& target, uint16_t port) {
+int runSend(const std::string& filePath, const std::string& target, uint16_t port, bool allowResume = true) {
     setupSignalHandlers();
     std::error_code ec;
     std::filesystem::path localFile(filePath);
@@ -245,6 +245,16 @@ int runSend(const std::string& filePath, const std::string& target, uint16_t por
     std::cout << "Pairing successful! Starting transfer of '" << localFile.filename().string() << "'...\n" << std::flush;
 
     peersync::TransferSession::Config config;
+    config.allowResume = allowResume;
+    config.onResumeDetected = [](const std::string& relPath, bool isResuming, uint64_t resumedBytes, uint64_t totalFileSize) {
+        if (isResuming) {
+            int percent = (totalFileSize > 0) ? static_cast<int>((resumedBytes * 100) / totalFileSize) : 100;
+            if (percent > 100) percent = 100;
+            std::cout << "Found incomplete transfer for " << relPath << ", resuming from " << percent << "%...\n" << std::flush;
+        } else {
+            std::cout << "Starting fresh transfer for " << relPath << "...\n" << std::flush;
+        }
+    };
     config.progressCallback = [](uint64_t bytesSent, uint64_t fileBytesProcessed, uint64_t totalFileSize) {
         int percent = (totalFileSize > 0) ? static_cast<int>((fileBytesProcessed * 100) / totalFileSize) : 100;
         if (percent > 100) percent = 100;
@@ -277,7 +287,7 @@ int runSend(const std::string& filePath, const std::string& target, uint16_t por
     return 0;
 }
 
-int runReceive(uint16_t port, const std::string& acceptDir) {
+int runReceive(uint16_t port, const std::string& acceptDir, bool allowResume = true) {
     setupSignalHandlers();
     std::error_code ec;
     std::filesystem::path dir(acceptDir);
@@ -369,7 +379,18 @@ int runReceive(uint16_t port, const std::string& acceptDir) {
 
     std::cout << "Pairing successful! Receiving file into '" << dir.string() << "'...\n" << std::flush;
 
-    peersync::TransferSession session(client);
+    peersync::TransferSession::Config config;
+    config.allowResume = allowResume;
+    config.onResumeDetected = [](const std::string& relPath, bool isResuming, uint64_t resumedBytes, uint64_t totalFileSize) {
+        if (isResuming) {
+            int percent = (totalFileSize > 0) ? static_cast<int>((resumedBytes * 100) / totalFileSize) : 100;
+            if (percent > 100) percent = 100;
+            std::cout << "Found incomplete transfer for " << relPath << ", resuming from " << percent << "%...\n" << std::flush;
+        } else {
+            std::cout << "Starting fresh transfer for " << relPath << "...\n" << std::flush;
+        }
+    };
+    peersync::TransferSession session(client, config);
     bool success = false;
     try {
         success = session.receiveFile(dir);
@@ -391,7 +412,7 @@ int runReceive(uint16_t port, const std::string& acceptDir) {
     return 0;
 }
 
-int runSync(const std::string& directory, const std::string& target, uint16_t port) {
+int runSync(const std::string& directory, const std::string& target, uint16_t port, bool allowResume = true) {
     setupSignalHandlers();
     std::error_code ec;
     std::filesystem::path localDir(directory);
@@ -492,6 +513,16 @@ int runSync(const std::string& directory, const std::string& target, uint16_t po
     peersync::SyncPolicy policy;
     policy.direction = peersync::SyncPolicy::Direction::Bidirectional;
     policy.maxConcurrency = 1;
+    policy.allowResume = allowResume;
+    policy.onResumeDetected = [](const std::string& relPath, bool isResuming, uint64_t resumedBytes, uint64_t totalSize) {
+        if (isResuming) {
+            int percent = (totalSize > 0) ? static_cast<int>((resumedBytes * 100) / totalSize) : 100;
+            if (percent > 100) percent = 100;
+            std::cout << "Found incomplete transfer for " << relPath << ", resuming from " << percent << "%...\n" << std::flush;
+        } else {
+            std::cout << "Starting fresh transfer for " << relPath << "...\n" << std::flush;
+        }
+    };
 
     std::string currentFile;
     size_t currentIdx = 0;
@@ -558,7 +589,7 @@ int runSync(const std::string& directory, const std::string& target, uint16_t po
     return 0;
 }
 
-int runReceiveDir(uint16_t port, const std::string& acceptDir) {
+int runReceiveDir(uint16_t port, const std::string& acceptDir, bool allowResume = true) {
     setupSignalHandlers();
     std::error_code ec;
     std::filesystem::path dir(acceptDir);
@@ -653,6 +684,16 @@ int runReceiveDir(uint16_t port, const std::string& acceptDir) {
     peersync::SyncPolicy policy;
     policy.direction = peersync::SyncPolicy::Direction::Bidirectional;
     policy.maxConcurrency = 1;
+    policy.allowResume = allowResume;
+    policy.onResumeDetected = [](const std::string& relPath, bool isResuming, uint64_t resumedBytes, uint64_t totalSize) {
+        if (isResuming) {
+            int percent = (totalSize > 0) ? static_cast<int>((resumedBytes * 100) / totalSize) : 100;
+            if (percent > 100) percent = 100;
+            std::cout << "Found incomplete transfer for " << relPath << ", resuming from " << percent << "%...\n" << std::flush;
+        } else {
+            std::cout << "Starting fresh transfer for " << relPath << "...\n" << std::flush;
+        }
+    };
 
     std::string currentFile;
     size_t currentIdx = 0;
@@ -725,6 +766,8 @@ int main(int argc, char* argv[]) {
     CLI::App app{"peersync - local network file synchronization"};
     app.require_subcommand(1);
 
+    bool allowResume = true;
+
     auto* listenCmd = app.add_subcommand("listen", "Start listening for peer connections and advertise over mDNS");
     std::string listenName = "";
     uint16_t listenPort = 0;
@@ -742,12 +785,14 @@ int main(int argc, char* argv[]) {
     sendCmd->add_option("file", sendFile, "Path to the file to send")->required();
     sendCmd->add_option("--to", sendTo, "Peer name or IP address (or IP:port)")->required();
     sendCmd->add_option("--port", sendPort, "TCP port of destination peer");
+    sendCmd->add_flag("--resume,!--no-resume", allowResume, "Enable/disable automatic resumption of interrupted transfers (default: true)");
 
     auto* receiveCmd = app.add_subcommand("receive", "Listen for and receive a file from a peer");
     uint16_t receivePort = 0;
     std::string receiveDir = ".";
     receiveCmd->add_option("--port", receivePort, "TCP port to listen on (defaults to 0 for ephemeral)");
     receiveCmd->add_option("--accept-dir", receiveDir, "Directory to save received file")->default_val(".");
+    receiveCmd->add_flag("--resume,!--no-resume", allowResume, "Enable/disable automatic resumption of interrupted transfers (default: true)");
 
     auto* syncCmd = app.add_subcommand("sync", "Synchronize a directory with a local network peer");
     std::string syncDir = "";
@@ -756,12 +801,14 @@ int main(int argc, char* argv[]) {
     syncCmd->add_option("directory", syncDir, "Path to the directory to sync")->required();
     syncCmd->add_option("--to", syncTo, "Peer name or IP address (or IP:port)")->required();
     syncCmd->add_option("--port", syncPort, "TCP port of destination peer");
+    syncCmd->add_flag("--resume,!--no-resume", allowResume, "Enable/disable automatic resumption of interrupted transfers (default: true)");
 
     auto* receiveDirCmd = app.add_subcommand("receive-dir", "Listen for and participate in a directory sync session");
     uint16_t receiveDirPort = 0;
     std::string receiveDirPath = ".";
     receiveDirCmd->add_option("--port", receiveDirPort, "TCP port to listen on (defaults to 0 for ephemeral)");
     receiveDirCmd->add_option("--accept-dir", receiveDirPath, "Directory to sync with peer")->default_val(".");
+    receiveDirCmd->add_flag("--resume,!--no-resume", allowResume, "Enable/disable automatic resumption of interrupted transfers (default: true)");
 
     CLI11_PARSE(app, argc, argv);
 
@@ -770,13 +817,13 @@ int main(int argc, char* argv[]) {
     } else if (app.got_subcommand(discoverCmd)) {
         return runDiscover(discoverTimeout);
     } else if (app.got_subcommand(sendCmd)) {
-        return runSend(sendFile, sendTo, sendPort);
+        return runSend(sendFile, sendTo, sendPort, allowResume);
     } else if (app.got_subcommand(receiveCmd)) {
-        return runReceive(receivePort, receiveDir);
+        return runReceive(receivePort, receiveDir, allowResume);
     } else if (app.got_subcommand(syncCmd)) {
-        return runSync(syncDir, syncTo, syncPort);
+        return runSync(syncDir, syncTo, syncPort, allowResume);
     } else if (app.got_subcommand(receiveDirCmd)) {
-        return runReceiveDir(receiveDirPort, receiveDirPath);
+        return runReceiveDir(receiveDirPort, receiveDirPath, allowResume);
     }
 
     return 0;

@@ -641,3 +641,158 @@ TEST(CliIntegrationTest, DirectorySyncInitialAndIncrementalResync) {
     std::filesystem::remove_all(tempDir, ec);
 #endif
 }
+
+TEST(CliIntegrationTest, ResumptionAfterInterruption) {
+#ifndef PEERSYNC_CLI_PATH
+    FAIL() << "PEERSYNC_CLI_PATH not defined";
+#else
+    std::string path = PEERSYNC_CLI_PATH;
+#ifdef _WIN32
+    for (char& c : path) {
+        if (c == '/') c = '\\';
+    }
+#endif
+    std::string cliExe = std::string("\"") + path + "\"";
+    uint16_t port1 = getFreeLoopbackPort();
+
+    std::error_code ec;
+    std::filesystem::path tempDir = std::filesystem::temp_directory_path() / ("peersync_cli_test_resume_" + std::to_string(port1));
+    std::filesystem::remove_all(tempDir, ec);
+    std::filesystem::create_directories(tempDir, ec);
+    std::filesystem::path srcFile = tempDir / "large_file.dat";
+    std::filesystem::path dstDir = tempDir / "dst";
+    std::filesystem::create_directories(dstDir, ec);
+
+    // Create a 10 MB file with pseudorandom content
+    const size_t fileSize = 10 * 1024 * 1024;
+    {
+        std::ofstream ofs(srcFile, std::ios::binary | std::ios::trunc);
+        std::vector<char> buffer(65536);
+        for (size_t i = 0; i < fileSize / buffer.size(); ++i) {
+            for (size_t j = 0; j < buffer.size(); ++j) {
+                buffer[j] = static_cast<char>((i * 13 + j * 7) & 0xFF);
+            }
+            ofs.write(buffer.data(), buffer.size());
+        }
+    }
+
+    // --- Part 1: Start transfer and interrupt midway ---
+    std::string recvCmd1 = cliExe + " receive --port " + std::to_string(port1) + " --accept-dir \"" + dstDir.string() + "\"";
+    auto recvProc1 = Subprocess::launch(recvCmd1, true, true);
+    ASSERT_TRUE(recvProc1.valid) << "Failed to launch receive process";
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    std::string sendCmd1 = cliExe + " send \"" + srcFile.string() + "\" --to 127.0.0.1:" + std::to_string(port1);
+    auto sendProc1 = Subprocess::launch(sendCmd1, true, false);
+    ASSERT_TRUE(sendProc1.valid) << "Failed to launch send process";
+
+    std::string sendOut1 = sendProc1.readUntil("device: ", 5000);
+    auto pinPos1 = sendOut1.find("device: ");
+    ASSERT_NE(pinPos1, std::string::npos) << "Could not find PIN prompt in sender output:\n" << sendOut1;
+
+    std::string pinStr1 = sendOut1.substr(pinPos1 + 8);
+    std::string pin1;
+    for (char c : pinStr1) {
+        if (std::isdigit(c)) pin1 += c;
+        if (pin1.length() == 6) break;
+    }
+    ASSERT_EQ(pin1.length(), 6) << "Extracted invalid PIN: " << pinStr1;
+
+    recvProc1.sendInput(pin1 + "\n");
+    recvProc1.closeInput();
+
+    // Wait until temporary file and journal exist and temporary file size is between 512 KB and 9 MB
+    bool interrupted = false;
+    auto startWait = std::chrono::steady_clock::now();
+    while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startWait).count() < 30000) {
+        if (std::filesystem::exists(dstDir / "large_file.dat.peersync-journal", ec) &&
+            std::filesystem::exists(dstDir / "large_file.dat.peersync-tmp", ec)) {
+            auto sz = std::filesystem::file_size(dstDir / "large_file.dat.peersync-tmp", ec);
+            if (!ec && sz >= 512 * 1024 && sz < 9 * 1024 * 1024) {
+                sendProc1.terminate();
+                recvProc1.terminate();
+                interrupted = true;
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(interrupted) << "Failed to interrupt transfer midway (file size threshold not met or transfer finished too quickly)";
+
+    ASSERT_TRUE(std::filesystem::exists(dstDir / "large_file.dat.peersync-journal", ec));
+    ASSERT_TRUE(std::filesystem::exists(dstDir / "large_file.dat.peersync-tmp", ec));
+    uint64_t partialSize = std::filesystem::file_size(dstDir / "large_file.dat.peersync-tmp", ec);
+    EXPECT_GT(partialSize, 0u);
+    EXPECT_LT(partialSize, fileSize);
+
+    // --- Part 2: Resume transfer ---
+    uint16_t port2 = getFreeLoopbackPort();
+    std::string recvCmd2 = cliExe + " receive --port " + std::to_string(port2) + " --accept-dir \"" + dstDir.string() + "\"";
+    auto recvProc2 = Subprocess::launch(recvCmd2, true, true);
+    ASSERT_TRUE(recvProc2.valid) << "Failed to launch second receive process";
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    std::string sendCmd2 = cliExe + " send \"" + srcFile.string() + "\" --to 127.0.0.1:" + std::to_string(port2);
+    auto sendProc2 = Subprocess::launch(sendCmd2, true, false);
+    ASSERT_TRUE(sendProc2.valid) << "Failed to launch second send process";
+
+    std::string sendOut2 = sendProc2.readUntil("device: ", 5000);
+    auto pinPos2 = sendOut2.find("device: ");
+    ASSERT_NE(pinPos2, std::string::npos) << "Could not find PIN prompt in second sender output:\n" << sendOut2;
+
+    std::string pinStr2 = sendOut2.substr(pinPos2 + 8);
+    std::string pin2;
+    for (char c : pinStr2) {
+        if (std::isdigit(c)) pin2 += c;
+        if (pin2.length() == 6) break;
+    }
+    ASSERT_EQ(pin2.length(), 6);
+
+    recvProc2.sendInput(pin2 + "\n");
+    recvProc2.closeInput();
+
+    std::string finalSendOut2 = sendProc2.readOutput();
+    std::string finalRecvOut2 = recvProc2.readOutput();
+
+    sendProc2.terminate();
+    recvProc2.terminate();
+
+    EXPECT_NE(finalSendOut2.find("Found incomplete transfer for large_file.dat, resuming from"), std::string::npos)
+        << "Expected resumption message in sender output:\n" << finalSendOut2;
+    EXPECT_NE(finalRecvOut2.find("Found incomplete transfer for large_file.dat, resuming from"), std::string::npos)
+        << "Expected resumption message in receiver output:\n" << finalRecvOut2;
+    EXPECT_NE(finalSendOut2.find("saved via delta sync"), std::string::npos)
+        << "Second sender failed to complete:\n" << finalSendOut2;
+    EXPECT_NE(finalRecvOut2.find("Transfer completed successfully!"), std::string::npos)
+        << "Second receiver failed to complete:\n" << finalRecvOut2;
+
+    // Confirm final file exists, temporary files are gone, and content is byte-identical
+    std::filesystem::path dstFile = dstDir / "large_file.dat";
+    ASSERT_TRUE(std::filesystem::exists(dstFile, ec));
+    EXPECT_FALSE(std::filesystem::exists(dstDir / "large_file.dat.peersync-tmp", ec));
+    EXPECT_FALSE(std::filesystem::exists(dstDir / "large_file.dat.peersync-journal", ec));
+    EXPECT_EQ(std::filesystem::file_size(dstFile, ec), fileSize);
+
+    // Verify byte identity
+    {
+        std::ifstream ifs1(srcFile, std::ios::binary);
+        std::ifstream ifs2(dstFile, std::ios::binary);
+        std::vector<char> buf1(65536);
+        std::vector<char> buf2(65536);
+        bool identical = true;
+        while (ifs1 && ifs2) {
+            ifs1.read(buf1.data(), buf1.size());
+            ifs2.read(buf2.data(), buf2.size());
+            if (ifs1.gcount() != ifs2.gcount() || !std::equal(buf1.begin(), buf1.begin() + ifs1.gcount(), buf2.begin())) {
+                identical = false;
+                break;
+            }
+        }
+        EXPECT_TRUE(identical) << "Resumed transfer resulted in corrupt/non-identical file content!";
+    }
+
+    std::filesystem::remove_all(tempDir, ec);
+#endif
+}

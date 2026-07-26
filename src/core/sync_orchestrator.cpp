@@ -9,7 +9,12 @@
 namespace peersync {
 
 SyncOrchestrator::SyncOrchestrator(TcpSocket& controlSocket, Role role, SyncPolicy policy)
-    : m_controlSocket(controlSocket), m_role(role), m_policy(std::move(policy)) {}
+    : m_controlSocket(controlSocket), m_role(role), m_policy(std::move(policy)) {
+    if (!m_policy.allowResume) m_policy.transferConfig.allowResume = false;
+    if (m_policy.onResumeDetected && !m_policy.transferConfig.onResumeDetected) {
+        m_policy.transferConfig.onResumeDetected = m_policy.onResumeDetected;
+    }
+}
 
 void SyncOrchestrator::recordActiveTransferStart() {
     size_t current = ++m_activeTransfers;

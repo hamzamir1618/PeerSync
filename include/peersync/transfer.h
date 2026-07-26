@@ -18,7 +18,9 @@ public:
         size_t blockSize = 1024;                // Block size for delta signatures and chunking
         size_t literalThreshold = 1024;         // Send literal bytes > threshold as BlockData messages
         size_t maxInstructionsPerMessage = 500; // Max instructions in a single DeltaInstructions message
+        bool allowResume = true;                // Whether automatic transfer resumption is permitted
         std::function<void(uint64_t bytesSent, uint64_t fileBytesProcessed, uint64_t totalFileSize)> progressCallback = nullptr;
+        std::function<void(const std::string& relPath, bool isResuming, uint64_t resumedBytes, uint64_t totalFileSize)> onResumeDetected = nullptr;
     };
 
     explicit TransferSession(TcpSocket& socket);
