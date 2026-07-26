@@ -30,3 +30,11 @@ target_link_libraries(peersync_perf_tests PRIVATE peersync_core GTest::gtest_mai
 gtest_discover_tests(peersync_perf_tests
     PROPERTIES LABELS "performance"
 )
+
+add_executable(peersync_stress_tests perf_resumability_stress.cpp)
+target_link_libraries(peersync_stress_tests PRIVATE peersync_core GTest::gtest_main)
+
+gtest_discover_tests(peersync_stress_tests
+    PROPERTIES LABELS "performance;stress"
+)
+
