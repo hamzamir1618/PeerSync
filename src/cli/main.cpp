@@ -245,6 +245,7 @@ int runSend(const std::string& filePath, const std::string& target, uint16_t por
     std::cout << "Pairing successful! Starting transfer of '" << localFile.filename().string() << "'...\n" << std::flush;
 
     peersync::TransferSession::Config config;
+    config.isCancelled = []() { return g_shutdownRequested.load(); };
     config.allowResume = allowResume;
     config.onResumeDetected = [](const std::string& relPath, bool isResuming, uint64_t resumedBytes, uint64_t totalFileSize) {
         if (isResuming) {
@@ -380,6 +381,7 @@ int runReceive(uint16_t port, const std::string& acceptDir, bool allowResume = t
     std::cout << "Pairing successful! Receiving file into '" << dir.string() << "'...\n" << std::flush;
 
     peersync::TransferSession::Config config;
+    config.isCancelled = []() { return g_shutdownRequested.load(); };
     config.allowResume = allowResume;
     config.onResumeDetected = [](const std::string& relPath, bool isResuming, uint64_t resumedBytes, uint64_t totalFileSize) {
         if (isResuming) {
@@ -511,6 +513,7 @@ int runSync(const std::string& directory, const std::string& target, uint16_t po
     std::cout << "Pairing successful! Starting directory sync of '" << localDir.string() << "'...\n" << std::flush;
 
     peersync::SyncPolicy policy;
+    policy.isCancelled = []() { return g_shutdownRequested.load(); };
     policy.direction = peersync::SyncPolicy::Direction::Bidirectional;
     policy.maxConcurrency = 1;
     policy.allowResume = allowResume;
@@ -682,6 +685,7 @@ int runReceiveDir(uint16_t port, const std::string& acceptDir, bool allowResume 
     std::cout << "Pairing successful! Starting directory sync into '" << dir.string() << "'...\n" << std::flush;
 
     peersync::SyncPolicy policy;
+    policy.isCancelled = []() { return g_shutdownRequested.load(); };
     policy.direction = peersync::SyncPolicy::Direction::Bidirectional;
     policy.maxConcurrency = 1;
     policy.allowResume = allowResume;

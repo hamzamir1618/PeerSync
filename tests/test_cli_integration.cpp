@@ -141,6 +141,12 @@ struct Subprocess {
         return m_capturedOutput;
     }
 
+    void interrupt() {
+        if (valid && pi.hProcess) {
+            TerminateProcess(pi.hProcess, 0);
+        }
+    }
+
     void terminate() {
         closeInput();
         if (valid && pi.hProcess) {
@@ -279,6 +285,12 @@ struct Subprocess {
             m_capturedOutput.append(buf, n);
         }
         return m_capturedOutput;
+    }
+
+    void interrupt() {
+        if (valid && pid > 0) {
+            kill(pid, SIGTERM);
+        }
     }
 
     void terminate() {
@@ -710,6 +722,8 @@ TEST(CliIntegrationTest, ResumptionAfterInterruption) {
             std::filesystem::exists(dstDir / "large_file.dat.peersync-tmp", ec)) {
             auto sz = std::filesystem::file_size(dstDir / "large_file.dat.peersync-tmp", ec);
             if (!ec && sz >= 512 * 1024 && sz < 9 * 1024 * 1024) {
+                sendProc1.interrupt();
+                recvProc1.interrupt();
                 sendProc1.terminate();
                 recvProc1.terminate();
                 interrupted = true;

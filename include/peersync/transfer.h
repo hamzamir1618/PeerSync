@@ -21,6 +21,7 @@ public:
         bool allowResume = true;                // Whether automatic transfer resumption is permitted
         std::function<void(uint64_t bytesSent, uint64_t fileBytesProcessed, uint64_t totalFileSize)> progressCallback = nullptr;
         std::function<void(const std::string& relPath, bool isResuming, uint64_t resumedBytes, uint64_t totalFileSize)> onResumeDetected = nullptr;
+        std::function<bool()> isCancelled = nullptr; // Returns true if transfer should be aborted immediately
     };
 
     explicit TransferSession(TcpSocket& socket);

@@ -26,6 +26,7 @@ struct SyncPolicy {
     std::function<void(const std::string& relPath, size_t fileIndex, size_t totalFiles, bool isSending)> onFileStart = nullptr;
     std::function<void(const std::string& relPath, size_t fileIndex, size_t totalFiles, uint64_t bytesTransferred, uint64_t fileSize, bool isSending)> onFileComplete = nullptr;
     std::function<void(const std::string& relPath, bool isResuming, uint64_t resumedBytes, uint64_t totalFileSize)> onResumeDetected = nullptr;
+    std::function<bool()> isCancelled = nullptr; // Returns true if sync should be aborted immediately
 };
 
 struct SyncPlan {

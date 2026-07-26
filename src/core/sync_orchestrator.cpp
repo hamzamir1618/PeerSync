@@ -230,12 +230,18 @@ bool SyncOrchestrator::executeSync(const std::filesystem::path& localDir, const 
     }
 
     // If worker socket pool failed or wasn't established for multi-concurrency, fall back to sequential over control socket
+    if (!m_policy.transferConfig.isCancelled && m_policy.isCancelled) {
+        m_policy.transferConfig.isCancelled = m_policy.isCancelled;
+    }
     if (workerSockets.size() < K) {
         workerSockets.clear();
         TransferSession session(m_controlSocket, m_policy.transferConfig);
         std::atomic<size_t> startedTasks{0};
         std::atomic<size_t> completedTasks{0};
         for (const auto& task : tasks) {
+            if (m_policy.isCancelled && m_policy.isCancelled()) {
+                return false;
+            }
             recordActiveTransferStart();
             uint64_t startBytes = task.isSending ? session.getBytesSent() : session.getBytesReceived();
             size_t startIdx = ++startedTasks;
@@ -272,7 +278,10 @@ bool SyncOrchestrator::executeSync(const std::filesystem::path& localDir, const 
             try {
                 TransferSession session(*workerSockets[workerIdx], m_policy.transferConfig);
                 for (size_t j = workerIdx; j < tasks.size(); j += K) {
-                    if (!overallSuccess.load()) break;
+                    if (!overallSuccess.load() || (m_policy.isCancelled && m_policy.isCancelled())) {
+                        overallSuccess = false;
+                        break;
+                    }
                     const auto& task = tasks[j];
                     recordActiveTransferStart();
                     uint64_t startBytes = task.isSending ? session.getBytesSent() : session.getBytesReceived();

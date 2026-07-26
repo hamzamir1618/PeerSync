@@ -139,6 +139,9 @@ std::vector<uint8_t> TransferSession::recvMsg() {
 }
 
 bool TransferSession::sendFile(const std::filesystem::path& localFile, const std::string& relativePath) {
+    if (m_config.isCancelled && m_config.isCancelled()) {
+        throw PeerSyncProtocolException("Transfer cancelled by user");
+    }
     std::error_code ec;
     if (!std::filesystem::exists(localFile, ec) || ec) {
         throw PeerSyncProtocolException("Local file does not exist for send: " + localFile.string());
@@ -217,6 +220,9 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
     }
 
     auto sendCurrentBatch = [&]() {
+        if (m_config.isCancelled && m_config.isCancelled()) {
+            throw PeerSyncProtocolException("Transfer cancelled by user");
+        }
         DeltaInstructionsMessage deltaMsg{relativePath, fileSize, static_cast<uint32_t>(m_config.blockSize), currentBatch};
         sendMsg(serializeMessage(deltaMsg));
         currentBatch.clear();
@@ -235,6 +241,9 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
     };
 
     for (const auto& inst : delta) {
+        if (m_config.isCancelled && m_config.isCancelled()) {
+            throw PeerSyncProtocolException("Transfer cancelled by user");
+        }
         uint64_t instLen = (inst.type == DeltaInstructionType::Literal) ? inst.bytes.size() : m_config.blockSize;
         if (instIndex < resumeOffset) {
             if (inst.type == DeltaInstructionType::Literal && inst.bytes.size() > m_config.literalThreshold) {
@@ -299,6 +308,9 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
 }
 
 bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
+    if (m_config.isCancelled && m_config.isCancelled()) {
+        throw PeerSyncProtocolException("Transfer cancelled by user");
+    }
     // 1. Receive ManifestRequest
     auto reqPayload = recvMsg();
     if (getMessageType(reqPayload) != MessageType::ManifestRequest) {
@@ -432,6 +444,9 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
 
     if (!isResuming || expectedFileSize == 0 || totalBytesApplied < expectedFileSize) {
         while (true) {
+            if (m_config.isCancelled && m_config.isCancelled()) {
+                throw PeerSyncProtocolException("Transfer cancelled by user");
+            }
             auto payload = recvMsg();
             MessageType type = getMessageType(payload);
 
@@ -461,6 +476,9 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
 
                 std::vector<uint8_t> readBuffer(currentBlockSize);
                 for (const auto& inst : deltaMsg.instructions) {
+                    if (m_config.isCancelled && m_config.isCancelled()) {
+                        throw PeerSyncProtocolException("Transfer cancelled by user");
+                    }
                     if (inst.type == DeltaInstructionType::Copy) {
                         if (!ifs.is_open()) {
                             throw PeerSyncProtocolException("Copy instruction received but no local file open for copying");
