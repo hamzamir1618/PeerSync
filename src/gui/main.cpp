@@ -23,6 +23,7 @@
 #include <peersync/pairing.h>
 #include <peersync/transfer.h>
 #include <peersync/sync_orchestrator.h>
+#include <peersync/gui_logic.h>
 #include <tinyfiledialogs.h>
 
 static std::string formatBytes(uint64_t bytes) {
@@ -89,14 +90,14 @@ public:
         return m_stats;
     }
 
-    void startInitiator(const std::string& ip, uint16_t port, const std::string& pin, bool isDir, const std::string& path) {
+    void startInitiator(const std::string& ip, uint16_t port, const std::string& pin, bool isDir, const std::string& path, bool allowResume = true) {
         reset();
-        m_thread = std::thread(&TransferWorker::runInitiator, this, ip, port, pin, isDir, path);
+        m_thread = std::thread(&TransferWorker::runInitiator, this, ip, port, pin, isDir, path, allowResume);
     }
 
-    void startResponder(uint16_t port, const std::string& pin, bool isDir, const std::string& path) {
+    void startResponder(uint16_t port, const std::string& pin, bool isDir, const std::string& path, bool allowResume = true) {
         reset();
-        m_thread = std::thread(&TransferWorker::runResponder, this, port, pin, isDir, path);
+        m_thread = std::thread(&TransferWorker::runResponder, this, port, pin, isDir, path, allowResume);
     }
 
 private:
@@ -132,7 +133,7 @@ private:
         }
     }
 
-    void runInitiator(std::string ip, uint16_t port, std::string pin, bool isDir, std::string path) {
+    void runInitiator(std::string ip, uint16_t port, std::string pin, bool isDir, std::string path, bool allowResume) {
         try {
             updateState(State::Connecting, "Connecting to " + ip + ":" + std::to_string(port) + "...");
             peersync::TcpSocket client = peersync::TcpSocket::connect(ip, port);
@@ -162,7 +163,7 @@ private:
             }
 
             updateState(State::Transferring, "Pairing successful! Starting transfer...");
-            executeTransfer(client, peersync::SyncOrchestrator::Role::Initiator, isDir, path, true);
+            executeTransfer(client, peersync::SyncOrchestrator::Role::Initiator, isDir, path, true, allowResume);
         } catch (const std::exception& e) {
             if (!m_cancelRequested.load()) {
                 updateError(e.what());
@@ -170,7 +171,7 @@ private:
         }
     }
 
-    void runResponder(uint16_t port, std::string pin, bool isDir, std::string path) {
+    void runResponder(uint16_t port, std::string pin, bool isDir, std::string path, bool allowResume) {
         try {
             updateState(State::Connecting, "Binding listening socket on port " + std::to_string(port) + "...");
             peersync::TcpSocket server = peersync::TcpSocket::listen(port, "0.0.0.0");
@@ -223,7 +224,7 @@ private:
             }
 
             updateState(State::Transferring, "Pairing successful! Receiving transfer...");
-            executeTransfer(client, peersync::SyncOrchestrator::Role::Responder, isDir, path, false);
+            executeTransfer(client, peersync::SyncOrchestrator::Role::Responder, isDir, path, false, allowResume);
         } catch (const std::exception& e) {
             if (!m_cancelRequested.load()) {
                 updateError(e.what());
@@ -231,11 +232,32 @@ private:
         }
     }
 
-    void executeTransfer(peersync::TcpSocket& socket, peersync::SyncOrchestrator::Role role, bool isDir, const std::string& path, bool isSending) {
+    void executeTransfer(peersync::TcpSocket& socket, peersync::SyncOrchestrator::Role role, bool isDir, const std::string& path, bool isSending, bool allowResume) {
+        if (!allowResume) {
+            std::error_code ec;
+            if (!isDir) {
+                std::filesystem::remove(path + ".peersync-journal", ec);
+                std::filesystem::remove(path + ".peersync-tmp", ec);
+            } else {
+                std::filesystem::path p(path);
+                if (std::filesystem::exists(p, ec) && std::filesystem::is_directory(p, ec)) {
+                    for (const auto& entry : std::filesystem::recursive_directory_iterator(p, ec)) {
+                        if (ec) break;
+                        std::string pStr = entry.path().string();
+                        if (pStr.length() >= 17 && pStr.compare(pStr.length() - 17, 17, ".peersync-journal") == 0) {
+                            std::filesystem::remove(entry.path(), ec);
+                            std::string tStr = pStr.substr(0, pStr.length() - 17) + ".peersync-tmp";
+                            std::filesystem::remove(tStr, ec);
+                        }
+                    }
+                }
+            }
+        }
+
         if (!isDir) {
             peersync::TransferSession::Config config;
             config.isCancelled = [this]() { return m_cancelRequested.load(); };
-            config.allowResume = true;
+            config.allowResume = allowResume;
             config.onResumeDetected = [this](const std::string& relPath, bool resuming, uint64_t resBytes, uint64_t totSize) {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_stats.isResuming = resuming;
@@ -280,7 +302,7 @@ private:
             policy.isCancelled = [this]() { return m_cancelRequested.load(); };
             policy.direction = peersync::SyncPolicy::Direction::Bidirectional;
             policy.maxConcurrency = 2;
-            policy.allowResume = true;
+            policy.allowResume = allowResume;
             policy.onResumeDetected = [this](const std::string& relPath, bool resuming, uint64_t resBytes, uint64_t totSize) {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 if (resuming) m_stats.isResuming = true;
@@ -470,6 +492,54 @@ private:
     bool m_isFolderMode{false};
     int m_listenPort{0};
 
+    mutable std::mutex m_historyMutex;
+    std::vector<peersync::TransferHistoryEntry> m_history;
+    size_t m_activeHistoryIndex{SIZE_MAX};
+
+    void updateActiveHistoryFromStats(const TransferWorker::Stats& stats) {
+        std::lock_guard<std::mutex> lock(m_historyMutex);
+        if (m_activeHistoryIndex != SIZE_MAX && m_activeHistoryIndex < m_history.size()) {
+            auto& entry = m_history[m_activeHistoryIndex];
+            entry.bytesTransferred = stats.bytesTransferred;
+            if (stats.totalBytes > 0) entry.totalBytes = stats.totalBytes;
+            if (stats.state == TransferWorker::State::Completed) {
+                entry.status = stats.isResuming ? peersync::TransferStatus::Resumed : peersync::TransferStatus::Completed;
+            } else if (stats.state == TransferWorker::State::Failed) {
+                if (stats.errorMessage.find("cancel") != std::string::npos || stats.statusMessage.find("cancel") != std::string::npos) {
+                    entry.status = peersync::TransferStatus::Interrupted;
+                } else {
+                    entry.status = peersync::TransferStatus::Failed;
+                }
+            } else if (stats.state == TransferWorker::State::Idle) {
+                if (entry.status == peersync::TransferStatus::InProgress) {
+                    entry.status = peersync::TransferStatus::Interrupted;
+                }
+            }
+        }
+    }
+
+    void startTransferWithHistory(bool isInitiator, bool allowResume) {
+        {
+            std::lock_guard<std::mutex> lock(m_historyMutex);
+            peersync::TransferHistoryEntry entry;
+            entry.peerName = m_selectedPeer.instanceName.empty() ? m_selectedPeer.ipAddress : m_selectedPeer.instanceName;
+            entry.peerIp = m_selectedPeer.ipAddress;
+            entry.peerPort = isInitiator ? m_selectedPeer.port : static_cast<uint16_t>(m_listenPort);
+            entry.path = m_selectedPath;
+            entry.isFolder = m_isFolderMode;
+            entry.status = peersync::TransferStatus::InProgress;
+            auto now = std::chrono::system_clock::now();
+            entry.timestampSec = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
+            m_history.push_back(entry);
+            m_activeHistoryIndex = m_history.size() - 1;
+        }
+        if (isInitiator) {
+            m_worker.startInitiator(m_selectedPeer.ipAddress, m_selectedPeer.port, m_generatedPin, m_isFolderMode, m_selectedPath, allowResume);
+        } else {
+            m_worker.startResponder(static_cast<uint16_t>(m_listenPort), m_enteredPin, m_isFolderMode, m_selectedPath, allowResume);
+        }
+    }
+
     void renderMainViewport() {
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -491,6 +561,10 @@ private:
 
         ImGui::Spacing();
         ImGui::Separator();
+        renderHistoryPanel();
+
+        ImGui::Spacing();
+        ImGui::Separator();
         renderStatusBar();
 
         if (m_showConnectPanel) {
@@ -499,6 +573,92 @@ private:
         }
 
         ImGui::End();
+    }
+
+    void renderHistoryPanel() {
+        if (ImGui::CollapsingHeader("Transfer History (Session)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            std::vector<peersync::TransferHistoryEntry> historyCopy;
+            {
+                std::lock_guard<std::mutex> lock(m_historyMutex);
+                historyCopy = m_history;
+            }
+            if (historyCopy.empty()) {
+                ImGui::TextDisabled("No transfers recorded in current session.");
+            } else {
+                ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY;
+                if (ImGui::BeginTable("HistoryTable", 6, flags, ImVec2(0, 100))) {
+                    ImGui::TableSetupColumn("Peer", ImGuiTableColumnFlags_WidthStretch, 0.2f);
+                    ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch, 0.35f);
+                    ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+                    ImGui::TableSetupColumn("Progress", ImGuiTableColumnFlags_WidthFixed, 65.0f);
+                    ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 85.0f);
+                    ImGui::TableSetupColumn("Time / Action", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+                    ImGui::TableHeadersRow();
+
+                    auto now = std::chrono::system_clock::now();
+                    uint64_t currentSec = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
+
+                    for (int i = static_cast<int>(historyCopy.size()) - 1; i >= 0; --i) {
+                        const auto& entry = historyCopy[i];
+                        ImGui::TableNextRow();
+
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextUnformatted(entry.peerName.c_str());
+
+                        ImGui::TableSetColumnIndex(1);
+                        std::filesystem::path p(entry.path);
+                        std::string fname = p.filename().string();
+                        if (fname.empty()) fname = entry.path;
+                        ImGui::TextUnformatted(fname.c_str());
+
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::TextUnformatted(formatBytes(entry.totalBytes).c_str());
+
+                        ImGui::TableSetColumnIndex(3);
+                        int pct = (entry.totalBytes > 0) ? static_cast<int>((entry.bytesTransferred * 100) / entry.totalBytes) : (entry.status == peersync::TransferStatus::Completed ? 100 : 0);
+                        if (pct > 100) pct = 100;
+                        ImGui::Text("%d%%", pct);
+
+                        ImGui::TableSetColumnIndex(4);
+                        std::string statusLbl = peersync::formatTransferStatusLabel(entry.status);
+                        if (entry.status == peersync::TransferStatus::Completed || entry.status == peersync::TransferStatus::Resumed) {
+                            ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "%s", statusLbl.c_str());
+                        } else if (entry.status == peersync::TransferStatus::Interrupted) {
+                            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "%s", statusLbl.c_str());
+                        } else if (entry.status == peersync::TransferStatus::Failed) {
+                            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", statusLbl.c_str());
+                        } else {
+                            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", statusLbl.c_str());
+                        }
+
+                        ImGui::TableSetColumnIndex(5);
+                        uint64_t elapsed = (currentSec >= entry.timestampSec) ? (currentSec - entry.timestampSec) : 0;
+                        ImGui::TextUnformatted(peersync::formatElapsedTime(elapsed).c_str());
+
+                        if (entry.status == peersync::TransferStatus::Interrupted || entry.status == peersync::TransferStatus::Failed) {
+                            ImGui::SameLine();
+                            ImGui::PushID(i);
+                            if (ImGui::SmallButton("Resume")) {
+                                peersync::DiscoveredPeer peer;
+                                peer.instanceName = entry.peerName;
+                                peer.ipAddress = entry.peerIp;
+                                peer.port = entry.peerPort;
+                                m_selectedPeer = peer;
+                                m_selectedPath = entry.path;
+                                m_isFolderMode = entry.isFolder;
+                                m_initiatorMode = true;
+                                m_generatedPin = peersync::generatePin();
+                                m_enteredPin[0] = '\0';
+                                m_showConnectPanel = true;
+                                m_worker.reset();
+                            }
+                            ImGui::PopID();
+                        }
+                    }
+                    ImGui::EndTable();
+                }
+            }
+        }
     }
 
     void renderHeader() {
@@ -524,7 +684,7 @@ private:
     }
 
     void renderPeersTable() {
-        float footerHeight = 36.0f;
+        float footerHeight = 160.0f;
         ImVec2 tableSize = ImVec2(0, ImGui::GetContentRegionAvail().y - footerHeight);
         
         ImGui::BeginChild("TableContainer", tableSize, true);
@@ -589,7 +749,7 @@ private:
     }
 
     void renderConnectModal() {
-        ImGui::SetNextWindowSize(ImVec2(560, 420), ImGuiCond_Appearing);
+        ImGui::SetNextWindowSize(ImVec2(560, 440), ImGuiCond_Appearing);
         ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
         if (ImGui::BeginPopupModal("Connect & Transfer", &m_showConnectPanel, flags)) {
             TransferWorker::Stats stats = m_worker.getStats();
@@ -636,13 +796,54 @@ private:
                     }
                     ImGui::TextWrapped("Selected Path: %s", m_selectedPath.empty() ? "(None selected)" : m_selectedPath.c_str());
                     ImGui::Spacing();
+
+                    uint64_t jApplied = 0, jExpected = 0;
+                    bool diskFound = !m_selectedPath.empty() && peersync::detectJournalForPath(m_selectedPath, m_isFolderMode, jApplied, jExpected);
+                    const peersync::TransferHistoryEntry* hist = nullptr;
+                    if (!m_selectedPath.empty()) {
+                        std::lock_guard<std::mutex> lock(m_historyMutex);
+                        std::string pName = m_selectedPeer.instanceName.empty() ? m_selectedPeer.ipAddress : m_selectedPeer.instanceName;
+                        hist = peersync::findRelevantResumableSession(m_history, pName, m_selectedPath);
+                    }
+                    bool canResume = diskFound || (hist != nullptr);
+                    uint64_t resBytes = diskFound ? jApplied : (hist ? hist->bytesTransferred : 0);
+                    uint64_t totBytes = diskFound ? jExpected : (hist ? hist->totalBytes : 0);
+
+                    if (canResume) {
+                        int pct = (totBytes > 0) ? static_cast<int>((resBytes * 100) / totBytes) : 0;
+                        if (pct > 100) pct = 100;
+                        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.22f, 0.28f, 1.0f));
+                        ImGui::BeginChild("ResumeNoticeInit", ImVec2(0, 55), true);
+                        ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), "[ Incomplete Prior Transfer Detected ]");
+                        if (totBytes > 0) {
+                            ImGui::Text("Progress: %s of %s (%d%% complete)", formatBytes(resBytes).c_str(), formatBytes(totBytes).c_str(), pct);
+                        } else {
+                            ImGui::Text("Previous interrupted sync session found for this target.");
+                        }
+                        ImGui::EndChild();
+                        ImGui::PopStyleColor();
+                    }
+
                     ImGui::Separator();
                     ImGui::Spacing();
 
                     bool canStart = !m_selectedPath.empty() && !m_selectedPeer.ipAddress.empty() && m_selectedPeer.port != 0;
                     if (!canStart) ImGui::BeginDisabled();
-                    if (ImGui::Button("Start Connection & Transfer", ImVec2(240, 36))) {
-                        m_worker.startInitiator(m_selectedPeer.ipAddress, m_selectedPeer.port, m_generatedPin, m_isFolderMode, m_selectedPath);
+                    if (canResume) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.65f, 0.5f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.75f, 0.6f, 1.0f));
+                        if (ImGui::Button("Resume Transfer (Fast)", ImVec2(200, 36))) {
+                            startTransferWithHistory(true, true);
+                        }
+                        ImGui::PopStyleColor(2);
+                        ImGui::SameLine();
+                        if (ImGui::Button("Start Fresh (--no-resume)", ImVec2(200, 36))) {
+                            startTransferWithHistory(true, false);
+                        }
+                    } else {
+                        if (ImGui::Button("Start Connection & Transfer", ImVec2(240, 36))) {
+                            startTransferWithHistory(true, true);
+                        }
                     }
                     if (!canStart) ImGui::EndDisabled();
                 } else {
@@ -669,13 +870,54 @@ private:
                     ImGui::Checkbox("Folder Sync Mode", &m_isFolderMode);
                     ImGui::TextWrapped("Destination Path: %s", m_selectedPath.empty() ? "(None selected)" : m_selectedPath.c_str());
                     ImGui::Spacing();
+
+                    uint64_t jApplied = 0, jExpected = 0;
+                    bool diskFound = !m_selectedPath.empty() && peersync::detectJournalForPath(m_selectedPath, m_isFolderMode, jApplied, jExpected);
+                    const peersync::TransferHistoryEntry* hist = nullptr;
+                    if (!m_selectedPath.empty()) {
+                        std::lock_guard<std::mutex> lock(m_historyMutex);
+                        std::string pName = m_selectedPeer.instanceName.empty() ? m_selectedPeer.ipAddress : m_selectedPeer.instanceName;
+                        hist = peersync::findRelevantResumableSession(m_history, pName, m_selectedPath);
+                    }
+                    bool canResume = diskFound || (hist != nullptr);
+                    uint64_t resBytes = diskFound ? jApplied : (hist ? hist->bytesTransferred : 0);
+                    uint64_t totBytes = diskFound ? jExpected : (hist ? hist->totalBytes : 0);
+
+                    if (canResume) {
+                        int pct = (totBytes > 0) ? static_cast<int>((resBytes * 100) / totBytes) : 0;
+                        if (pct > 100) pct = 100;
+                        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.22f, 0.28f, 1.0f));
+                        ImGui::BeginChild("ResumeNoticeResp", ImVec2(0, 55), true);
+                        ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), "[ Incomplete Prior Transfer Detected ]");
+                        if (totBytes > 0) {
+                            ImGui::Text("Progress: %s of %s (%d%% complete)", formatBytes(resBytes).c_str(), formatBytes(totBytes).c_str(), pct);
+                        } else {
+                            ImGui::Text("Previous interrupted sync session found for this target.");
+                        }
+                        ImGui::EndChild();
+                        ImGui::PopStyleColor();
+                    }
+
                     ImGui::Separator();
                     ImGui::Spacing();
 
                     bool canStart = !m_selectedPath.empty() && strlen(m_enteredPin) > 0;
                     if (!canStart) ImGui::BeginDisabled();
-                    if (ImGui::Button("Start Listening & Pairing", ImVec2(240, 36))) {
-                        m_worker.startResponder(static_cast<uint16_t>(m_listenPort), m_enteredPin, m_isFolderMode, m_selectedPath);
+                    if (canResume) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.65f, 0.5f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.75f, 0.6f, 1.0f));
+                        if (ImGui::Button("Resume Receive (Fast)", ImVec2(200, 36))) {
+                            startTransferWithHistory(false, true);
+                        }
+                        ImGui::PopStyleColor(2);
+                        ImGui::SameLine();
+                        if (ImGui::Button("Receive Fresh (--no-resume)", ImVec2(200, 36))) {
+                            startTransferWithHistory(false, false);
+                        }
+                    } else {
+                        if (ImGui::Button("Start Listening & Pairing", ImVec2(240, 36))) {
+                            startTransferWithHistory(false, true);
+                        }
                     }
                     if (!canStart) ImGui::EndDisabled();
                 }
@@ -686,6 +928,8 @@ private:
                     m_showConnectPanel = false;
                 }
             } else {
+                updateActiveHistoryFromStats(stats);
+
                 std::string stateTitle = "Status: Working...";
                 if (stats.state == TransferWorker::State::Connecting) stateTitle = "Status: Connecting...";
                 else if (stats.state == TransferWorker::State::Pairing) stateTitle = "Status: Secure Pairing...";
@@ -748,16 +992,27 @@ private:
 
                 if (stats.state == TransferWorker::State::Completed || stats.state == TransferWorker::State::Failed) {
                     if (ImGui::Button("Close / Return to Peer List", ImVec2(240, 36))) {
+                        updateActiveHistoryFromStats(stats);
+                        m_activeHistoryIndex = SIZE_MAX;
                         m_worker.reset();
                         ImGui::CloseCurrentPopup();
                         m_showConnectPanel = false;
                     }
                     ImGui::SameLine();
                     if (ImGui::Button("Start Another Transfer", ImVec2(200, 36))) {
+                        updateActiveHistoryFromStats(stats);
+                        m_activeHistoryIndex = SIZE_MAX;
                         m_worker.reset();
                     }
                 } else {
                     if (ImGui::Button("Cancel Operation", ImVec2(180, 36))) {
+                        {
+                            std::lock_guard<std::mutex> lock(m_historyMutex);
+                            if (m_activeHistoryIndex != SIZE_MAX && m_activeHistoryIndex < m_history.size()) {
+                                m_history[m_activeHistoryIndex].status = peersync::TransferStatus::Interrupted;
+                            }
+                        }
+                        m_activeHistoryIndex = SIZE_MAX;
                         m_worker.stop();
                     }
                 }
