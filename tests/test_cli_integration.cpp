@@ -675,8 +675,8 @@ TEST(CliIntegrationTest, ResumptionAfterInterruption) {
     std::filesystem::path dstDir = tempDir / "dst";
     std::filesystem::create_directories(dstDir, ec);
 
-    // Create a 10 MB file with pseudorandom content
-    const size_t fileSize = 10 * 1024 * 1024;
+    // Create a 50 MB file with pseudorandom content
+    const size_t fileSize = 50 * 1024 * 1024;
     {
         std::ofstream ofs(srcFile, std::ios::binary | std::ios::trunc);
         std::vector<char> buffer(65536);
@@ -714,14 +714,23 @@ TEST(CliIntegrationTest, ResumptionAfterInterruption) {
     recvProc1.sendInput(pin1 + "\n");
     recvProc1.closeInput();
 
-    // Wait until temporary file and journal exist and temporary file size is between 512 KB and 9 MB
+    // Wait until temporary file and journal exist and progress is between 256 KB and 48 MB
     bool interrupted = false;
     auto startWait = std::chrono::steady_clock::now();
     while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startWait).count() < 30000) {
-        if (std::filesystem::exists(dstDir / "large_file.dat.peersync-journal", ec) &&
-            std::filesystem::exists(dstDir / "large_file.dat.peersync-tmp", ec)) {
-            auto sz = std::filesystem::file_size(dstDir / "large_file.dat.peersync-tmp", ec);
-            if (!ec && sz >= 512 * 1024 && sz < 9 * 1024 * 1024) {
+        std::filesystem::path jPath = dstDir / "large_file.dat.peersync-journal";
+        std::filesystem::path tPath = dstDir / "large_file.dat.peersync-tmp";
+        if (std::filesystem::exists(jPath, ec) && std::filesystem::exists(tPath, ec)) {
+            uint64_t bytesApplied = 0;
+            std::ifstream jfs(jPath);
+            std::string line;
+            while (std::getline(jfs, line)) {
+                if (line.find("bytes_applied=") == 0) {
+                    try { bytesApplied = std::stoull(line.substr(14)); } catch (...) {}
+                }
+            }
+            auto sz = std::filesystem::file_size(tPath, ec);
+            if (!ec && ((bytesApplied >= 256 * 1024 && bytesApplied < 48 * 1024 * 1024) || (sz >= 256 * 1024 && sz < 48 * 1024 * 1024))) {
                 sendProc1.interrupt();
                 recvProc1.interrupt();
                 sendProc1.terminate();
@@ -730,7 +739,7 @@ TEST(CliIntegrationTest, ResumptionAfterInterruption) {
                 break;
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::yield();
     }
     ASSERT_TRUE(interrupted) << "Failed to interrupt transfer midway (file size threshold not met or transfer finished too quickly)";
 
