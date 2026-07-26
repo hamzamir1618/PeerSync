@@ -23,3 +23,10 @@ gtest_discover_tests(peersync_tests
     TEST_FILTER "-CliIntegrationTest.DiscoverFindsListeningAdvertiser"
     PROPERTIES LABELS "unit"
 )
+
+add_executable(peersync_perf_tests perf_delta_benchmark.cpp)
+target_link_libraries(peersync_perf_tests PRIVATE peersync_core GTest::gtest_main)
+
+gtest_discover_tests(peersync_perf_tests
+    PROPERTIES LABELS "performance"
+)
