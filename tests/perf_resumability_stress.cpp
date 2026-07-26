@@ -12,6 +12,8 @@
 #include <chrono>
 #include <atomic>
 #include <iostream>
+#include <cstring>
+
 
 namespace {
 
