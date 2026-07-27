@@ -43,6 +43,9 @@ std::vector<BlockSignature> computeSignatures(const std::filesystem::path& file,
 
     std::vector<BlockSignature> signatures;
 
+    if (blockSize == 0 || blockSize > 1024 * 1024 * 64) {
+        throw PeerSyncDeltaException("Block size must be between 1 and 64 MB");
+    }
     std::error_code ec;
     if (!std::filesystem::exists(file, ec) || ec) {
         throw PeerSyncDeltaException("File does not exist: " + file.string());
@@ -85,8 +88,8 @@ std::vector<BlockSignature> computeSignatures(const std::filesystem::path& file,
 std::vector<DeltaInstruction> computeDelta(const std::filesystem::path& newFile,
                                            const std::vector<BlockSignature>& oldFileSignatures,
                                            size_t blockSize) {
-    if (blockSize == 0) {
-        throw PeerSyncDeltaException("Block size must be greater than zero");
+    if (blockSize == 0 || blockSize > 1024 * 1024 * 64) {
+        throw PeerSyncDeltaException("Block size must be between 1 and 64 MB");
     }
 
     std::error_code ec;
@@ -184,8 +187,8 @@ void reconstructFile(const std::filesystem::path& oldFile,
                      const std::vector<DeltaInstruction>& instructions,
                      const std::filesystem::path& outputFile,
                      size_t blockSize) {
-    if (blockSize == 0) {
-        throw PeerSyncDeltaException("Block size must be greater than zero");
+    if (blockSize == 0 || blockSize > 1024 * 1024 * 64) {
+        throw PeerSyncDeltaException("Block size must be between 1 and 64 MB");
     }
 
     std::error_code ec;
@@ -237,15 +240,15 @@ void reconstructFile(const std::filesystem::path& oldFile,
 
     for (const auto& inst : instructions) {
         if (inst.type == DeltaInstructionType::Copy) {
+            if (oldFileSize == 0) {
+                throw PeerSyncDeltaException("Cannot copy from an empty file");
+            }
             if (blockSize > 0 && inst.blockIndex > UINT64_MAX / blockSize) {
                 throw PeerSyncDeltaException("Copy instruction block index arithmetic overflow");
             }
             uint64_t offset = inst.blockIndex * blockSize;
-            if (offset >= oldFileSize && !(oldFileSize == 0 && offset == 0 && inst.blockIndex == 0)) {
+            if (offset >= oldFileSize) {
                 throw PeerSyncDeltaException("Copy instruction block index out of bounds");
-            }
-            if (oldFileSize == 0) {
-                throw PeerSyncDeltaException("Cannot copy from an empty file");
             }
             size_t bytesToRead = static_cast<size_t>(std::min(static_cast<uint64_t>(blockSize), oldFileSize - offset));
             ifs.seekg(static_cast<std::streamoff>(offset), std::ios::beg);

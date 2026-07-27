@@ -1,0 +1,9 @@
+add_executable(fuzz_message_deserialization fuzz_message_deserialization.cpp)
+target_link_libraries(fuzz_message_deserialization PRIVATE peersync_core)
+target_compile_options(fuzz_message_deserialization PRIVATE -fsanitize=fuzzer,address,undefined)
+target_link_options(fuzz_message_deserialization PRIVATE -fsanitize=fuzzer,address,undefined)
+
+add_executable(fuzz_reconstruct_file fuzz_reconstruct_file.cpp)
+target_link_libraries(fuzz_reconstruct_file PRIVATE peersync_core)
+target_compile_options(fuzz_reconstruct_file PRIVATE -fsanitize=fuzzer,address,undefined)
+target_link_options(fuzz_reconstruct_file PRIVATE -fsanitize=fuzzer,address,undefined)

@@ -121,6 +121,14 @@ public:
     }
 
 
+    void validateCount(uint32_t count, size_t minElemSize) const {
+        if (minElemSize > 0 && static_cast<uint64_t>(count) > (m_data.size() - m_offset) / minElemSize) {
+            throw PeerSyncProtocolException("Container count " + std::to_string(count) + 
+                                            " exceeds remaining payload capacity (" +
+                                            std::to_string(m_data.size() - m_offset) + " bytes remaining)");
+        }
+    }
+
     bool hasMore() const {
         return m_offset < m_data.size();
     }
@@ -275,6 +283,7 @@ ManifestResponseMessage deserializeManifestResponseMessage(const std::vector<uin
     reader.expectMessageType(MessageType::ManifestResponse);
     ManifestResponseMessage msg;
     uint32_t count = reader.readU32();
+    reader.validateCount(count, 24);
     msg.files.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         FileEntry file;
@@ -285,6 +294,7 @@ ManifestResponseMessage deserializeManifestResponseMessage(const std::vector<uin
         msg.files.push_back(file);
     }
     uint32_t sigCount = reader.readU32();
+    reader.validateCount(sigCount, 20);
     msg.signatures.reserve(sigCount);
     for (uint32_t i = 0; i < sigCount; ++i) {
         BlockSignature sig;
@@ -325,6 +335,7 @@ DeltaInstructionsMessage deserializeDeltaInstructionsMessage(const std::vector<u
     msg.targetFileSize = reader.readU64();
     msg.blockSize = reader.readU32();
     uint32_t count = reader.readU32();
+    reader.validateCount(count, 9);
     msg.instructions.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         uint8_t typeVal = reader.readU8();
@@ -409,6 +420,7 @@ ResumeRequestMessage deserializeResumeRequestMessage(const std::vector<uint8_t>&
     msg.fileHash = reader.readString();
     msg.lastOffset = reader.readU64();
     uint32_t sigCount = reader.readU32();
+    reader.validateCount(sigCount, 20);
     msg.signatures.reserve(sigCount);
     for (uint32_t i = 0; i < sigCount; ++i) {
         BlockSignature sig;
@@ -501,6 +513,7 @@ DirectoryManifestRequestMessage deserializeDirectoryManifestRequestMessage(const
     reader.expectMessageType(MessageType::DirectoryManifestRequest);
     DirectoryManifestRequestMessage msg;
     uint32_t count = reader.readU32();
+    reader.validateCount(count, 24);
     msg.files.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         FileEntry file;
@@ -534,6 +547,7 @@ DirectoryManifestResponseMessage deserializeDirectoryManifestResponseMessage(con
     reader.expectMessageType(MessageType::DirectoryManifestResponse);
     DirectoryManifestResponseMessage msg;
     uint32_t count = reader.readU32();
+    reader.validateCount(count, 24);
     msg.files.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         FileEntry file;
