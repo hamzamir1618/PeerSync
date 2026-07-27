@@ -255,7 +255,10 @@ TcpSocket TcpSocket::connect(const std::string& host, uint16_t port, int timeout
     fcntl(sock, F_SETFL, flags);
 #endif
 
-    return TcpSocket(static_cast<handle_type>(sock));
+    TcpSocket resSocket(static_cast<handle_type>(sock));
+    resSocket.setRecvTimeout(60000);
+    resSocket.setSendTimeout(60000);
+    return resSocket;
 }
 
 TcpSocket TcpSocket::accept() {
@@ -268,7 +271,10 @@ TcpSocket TcpSocket::accept() {
     if (clientSock == OS_INVALID_SOCKET) {
         throwNetworkError("accept");
     }
-    return TcpSocket(static_cast<handle_type>(clientSock));
+    TcpSocket clientSocket(static_cast<handle_type>(clientSock));
+    clientSocket.setRecvTimeout(60000);
+    clientSocket.setSendTimeout(60000);
+    return clientSocket;
 }
 
 size_t TcpSocket::send(const uint8_t* data, size_t len) {
@@ -349,6 +355,44 @@ uint16_t TcpSocket::getBoundPort() const {
         throwNetworkError("getsockname");
     }
     return ntohs(addr.sin_port);
+}
+
+void TcpSocket::setRecvTimeout(int timeoutMs) {
+    if (m_handle == invalid_handle) {
+        throw PeerSyncNetworkException("setRecvTimeout called on invalid socket");
+    }
+#ifdef _WIN32
+    DWORD timeout = static_cast<DWORD>(timeoutMs);
+    if (::setsockopt(static_cast<SOCKET>(m_handle), SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout)) != 0) {
+        throwNetworkError("setsockopt(SO_RCVTIMEO)");
+    }
+#else
+    struct timeval tv{};
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+    if (::setsockopt(static_cast<int>(m_handle), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
+        throwNetworkError("setsockopt(SO_RCVTIMEO)");
+    }
+#endif
+}
+
+void TcpSocket::setSendTimeout(int timeoutMs) {
+    if (m_handle == invalid_handle) {
+        throw PeerSyncNetworkException("setSendTimeout called on invalid socket");
+    }
+#ifdef _WIN32
+    DWORD timeout = static_cast<DWORD>(timeoutMs);
+    if (::setsockopt(static_cast<SOCKET>(m_handle), SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout)) != 0) {
+        throwNetworkError("setsockopt(SO_SNDTIMEO)");
+    }
+#else
+    struct timeval tv{};
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+    if (::setsockopt(static_cast<int>(m_handle), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0) {
+        throwNetworkError("setsockopt(SO_SNDTIMEO)");
+    }
+#endif
 }
 
 } // namespace peersync

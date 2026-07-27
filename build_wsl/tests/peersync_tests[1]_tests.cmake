@@ -1,0 +1,3 @@
+add_test([=[CliIntegrationTest.DiscoverFindsListeningAdvertiser]=]  [==[/mnt/d/OFFICE WORK/RESUME-CV STUFF/Projects/offline-file-sync/peersync/build_wsl/tests/peersync_tests]==] [==[--gtest_filter=CliIntegrationTest.DiscoverFindsListeningAdvertiser]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[CliIntegrationTest.DiscoverFindsListeningAdvertiser]=]  PROPERTIES WORKING_DIRECTORY [==[/mnt/d/OFFICE WORK/RESUME-CV STUFF/Projects/offline-file-sync/peersync/build_wsl/tests]==] SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==] LABELS requires_multicast)
+set(  peersync_tests_TESTS CliIntegrationTest.DiscoverFindsListeningAdvertiser)

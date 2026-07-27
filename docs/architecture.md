@@ -183,6 +183,17 @@ To maximize throughput without overwhelming network or system resources, transfe
 
 Transfers execute across a pool of independent worker TCP connections bounded by `SyncPolicy::maxConcurrency` (defaulting to 4 concurrent worker threads). Each worker thread instantiates an independent `TransferSession` over its dedicated socket, applying rsync-style rolling checksum delta transfers and resumable journaling to each assigned file until the synchronization plan is fully satisfied.
 
+### 4. Simultaneous Sync Tie-Breaker & Network Fault Resilience
+In dynamic peer-to-peer environments with automatic mDNS/DNS-SD discovery, two peer nodes may discover each other and simultaneously attempt to initiate a file or directory synchronization for the exact same target path. Without coordination, both peers would simultaneously open sender transfer sessions and transmit `ManifestRequest` messages, resulting in protocol deadlock or cross-talk.
+
+To resolve simultaneous push collisions deterministically, **peersync** implements a stateless tie-breaking protocol via `resolveSimultaneousSyncRole` (`src/core/conflict_resolution.cpp`). Both peers evaluate a lexicographical comparison of their identifiers (`deviceName`, tie-breaking on `ipAddress`, then `port`):
+- **Sender Role**: The peer with the lexicographically smaller identifier (`localPeer < remotePeer`) assumes the `SimultaneousSyncRole::Sender` role and proceeds with its active push attempt (`sendFile`).
+- **Receiver Role**: The peer with the lexicographically larger identifier assumes the `SimultaneousSyncRole::Receiver` role, yields its outbound push attempt, and transitions its socket session to listen for incoming transfer instructions (`receiveFile`).
+
+To prevent denial-of-service or indefinite thread hangs from network stalls and malformed transmissions, protocol sessions enforce strict expectations and socket timeouts:
+- **Read Timeouts on Partial Sends**: Sockets configured via `TcpSocket::setRecvTimeout` and `setSendTimeout` enforce a 60-second read deadline in `connect()` and `accept()`. If a remote peer transmits a valid 4-byte frame length header but hangs or drops the connection without completing the payload, `recvExactly` times out and raises a `PeerSyncNetworkException` cleanly.
+- **Out-of-Order Message Expectation Enforcement**: At each step of the synchronization state machine (e.g., awaiting a `ManifestResponse` after sending a `ManifestRequest`), receiving an unexpected message type (such as `BlockDataMessage` or `HelloMessage`) immediately terminates the session with a `PeerSyncProtocolException`, protecting internal structures from invalid protocol transitions.
+
 ## Performance Benchmarks & Baseline Numbers
 
 To validate the scalability and efficiency of **peersync**'s rolling-window delta synchronization engine, end-to-end performance benchmarks are implemented in `tests/perf_delta_benchmark.cpp` (labeled with `performance` in CTest and excluded from default CI runs).

@@ -32,6 +32,8 @@ public:
     size_t recv(uint8_t* buffer, size_t maxLen);
 
     uint16_t getBoundPort() const;
+    void setRecvTimeout(int timeoutMs);
+    void setSendTimeout(int timeoutMs);
     void close() noexcept;
     bool isValid() const noexcept { return m_handle != invalid_handle; }
 

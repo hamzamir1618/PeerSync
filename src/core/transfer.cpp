@@ -185,7 +185,7 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
     }
 
     if (respType != MessageType::ManifestResponse && !isResuming) {
-        throw PeerSyncProtocolException("Expected ManifestResponse message");
+        throw PeerSyncProtocolException("Expected ManifestResponse message, got type " + std::to_string(static_cast<int>(respType)));
     }
     if (respType == MessageType::ManifestResponse) {
         auto respMsg = deserializeManifestResponseMessage(respPayload);
@@ -287,7 +287,7 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
     // 5. Receive TransferComplete from receiver
     auto compPayload = recvMsg();
     if (getMessageType(compPayload) != MessageType::TransferComplete) {
-        throw PeerSyncProtocolException("Expected TransferComplete message");
+        throw PeerSyncProtocolException("Expected TransferComplete message, got type " + std::to_string(static_cast<int>(getMessageType(compPayload))));
     }
     auto compMsg = deserializeTransferCompleteMessage(compPayload);
     if (!compMsg.success || compMsg.finalHash != expectedHash) {
@@ -314,7 +314,7 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
     // 1. Receive ManifestRequest
     auto reqPayload = recvMsg();
     if (getMessageType(reqPayload) != MessageType::ManifestRequest) {
-        throw PeerSyncProtocolException("Expected ManifestRequest message");
+        throw PeerSyncProtocolException("Expected ManifestRequest message, got type " + std::to_string(static_cast<int>(getMessageType(reqPayload))));
     }
     auto reqMsg = deserializeManifestRequestMessage(reqPayload);
     std::string relativePath = reqMsg.path;
@@ -355,7 +355,7 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
 
         auto respPayload = recvMsg();
         if (getMessageType(respPayload) != MessageType::ResumeResponse) {
-            throw PeerSyncProtocolException("Expected ResumeResponse message");
+            throw PeerSyncProtocolException("Expected ResumeResponse message, got type " + std::to_string(static_cast<int>(getMessageType(respPayload))));
         }
         auto resumeResp = deserializeResumeResponseMessage(respPayload);
         if (!resumeResp.canResume) {

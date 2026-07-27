@@ -76,7 +76,7 @@ std::vector<FileEntry> SyncOrchestrator::exchangeManifests(const std::vector<Fil
 
         std::vector<uint8_t> respPayload = recvFramedMessage(m_controlSocket);
         if (getMessageType(respPayload) != MessageType::DirectoryManifestResponse) {
-            throw PeerSyncProtocolException("Expected DirectoryManifestResponse");
+            throw PeerSyncProtocolException("Expected DirectoryManifestResponse, got message type " + std::to_string(static_cast<int>(getMessageType(respPayload))));
         }
         auto resp = deserializeDirectoryManifestResponseMessage(respPayload);
         m_remoteWorkerPort = resp.workerPort;
@@ -84,7 +84,7 @@ std::vector<FileEntry> SyncOrchestrator::exchangeManifests(const std::vector<Fil
     } else {
         std::vector<uint8_t> reqPayload = recvFramedMessage(m_controlSocket);
         if (getMessageType(reqPayload) != MessageType::DirectoryManifestRequest) {
-            throw PeerSyncProtocolException("Expected DirectoryManifestRequest");
+            throw PeerSyncProtocolException("Expected DirectoryManifestRequest, got message type " + std::to_string(static_cast<int>(getMessageType(reqPayload))));
         }
         auto req = deserializeDirectoryManifestRequestMessage(reqPayload);
 
