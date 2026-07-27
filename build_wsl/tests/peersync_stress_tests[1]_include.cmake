@@ -1,5 +1,0 @@
-if(EXISTS "/mnt/d/OFFICE WORK/RESUME-CV STUFF/Projects/offline-file-sync/peersync/build_wsl/tests/peersync_stress_tests[1]_tests.cmake")
-  include("/mnt/d/OFFICE WORK/RESUME-CV STUFF/Projects/offline-file-sync/peersync/build_wsl/tests/peersync_stress_tests[1]_tests.cmake")
-else()
-  add_test(peersync_stress_tests_NOT_BUILT peersync_stress_tests_NOT_BUILT)
-endif()

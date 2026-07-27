@@ -1,3 +1,0 @@
-add_test([=[ResumabilityStressTest.MultiFileDirectorySyncWithRandomInterruptions]=]  [==[/mnt/d/OFFICE WORK/RESUME-CV STUFF/Projects/offline-file-sync/peersync/build_wsl/tests/peersync_stress_tests]==] [==[--gtest_filter=ResumabilityStressTest.MultiFileDirectorySyncWithRandomInterruptions]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[ResumabilityStressTest.MultiFileDirectorySyncWithRandomInterruptions]=]  PROPERTIES WORKING_DIRECTORY [==[/mnt/d/OFFICE WORK/RESUME-CV STUFF/Projects/offline-file-sync/peersync/build_wsl/tests]==] SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==] LABELS performance stress)
-set(  peersync_stress_tests_TESTS ResumabilityStressTest.MultiFileDirectorySyncWithRandomInterruptions)

@@ -46,6 +46,7 @@ _deps/
 # Build directories
 build/
 build-*/
+build_*/
 out/
 bin/
 dist/
