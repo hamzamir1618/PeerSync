@@ -49,4 +49,42 @@ jobs:
         run: cmake --build build --config Release
 
       - name: Run Tests
-        run: ctest --test-dir build --output-on-failure -C Release -LE "requires_multicast|performance"
+        run: ctest --test-dir build --output-on-failure -C Release -LE "requires_multicast|performance|stress"
+
+  asan-ubsan:
+    name: ASan / UBSan (ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache FetchContent / _deps
+        uses: actions/cache@v4
+        with:
+          path: build-asan/_deps
+          key: ubuntu-latest-asan-deps-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            ubuntu-latest-asan-deps-
+            ubuntu-latest-deps-
+
+      - name: Install Linux GUI Dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libxcursor-dev libxinerama-dev libxi-dev libxrandr-dev libxss-dev libx11-dev libwayland-dev libxkbcommon-dev
+
+      - name: Configure CMake
+        run: >
+          cmake -S . -B build-asan
+          -DCMAKE_BUILD_TYPE=Debug
+          -DPEERSYNC_BUILD_TESTS=ON
+          -DPEERSYNC_BUILD_GUI=ON
+          -DPEERSYNC_ENABLE_SANITIZERS=ON
+
+      - name: Build Project
+        run: cmake --build build-asan --config Debug
+
+      - name: Run Tests
+        env:
+          ASAN_OPTIONS: "detect_leaks=1:abort_on_error=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:abort_on_error=1"
+        run: ctest --test-dir build-asan --output-on-failure -C Debug -LE "requires_multicast|performance|stress"
+

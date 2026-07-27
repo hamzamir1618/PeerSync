@@ -275,12 +275,17 @@ size_t TcpSocket::send(const uint8_t* data, size_t len) {
     if (m_handle == invalid_handle) {
         throw PeerSyncNetworkException("send called on invalid socket");
     }
+    if (len == 0) return 0;
+    if (data == nullptr) {
+        throw PeerSyncNetworkException("send called with null buffer and non-zero length");
+    }
     size_t totalSent = 0;
     while (totalSent < len) {
+        size_t chunk = std::min<size_t>(len - totalSent, 1024 * 1024 * 64);
 #ifdef _WIN32
-        int res = ::send(static_cast<SOCKET>(m_handle), (const char*)(data + totalSent), static_cast<int>(len - totalSent), 0);
+        int res = ::send(static_cast<SOCKET>(m_handle), (const char*)(data + totalSent), static_cast<int>(chunk), 0);
 #else
-        ssize_t res = ::send(static_cast<int>(m_handle), data + totalSent, len - totalSent, 0);
+        ssize_t res = ::send(static_cast<int>(m_handle), data + totalSent, chunk, 0);
 #endif
         if (res < 0) {
             int err = getLastError();
@@ -302,12 +307,16 @@ size_t TcpSocket::recv(uint8_t* buffer, size_t maxLen) {
         throw PeerSyncNetworkException("recv called on invalid socket");
     }
     if (maxLen == 0) return 0;
+    if (buffer == nullptr) {
+        throw PeerSyncNetworkException("recv called with null buffer and non-zero maxLen");
+    }
 
     while (true) {
+        size_t chunk = std::min<size_t>(maxLen, 1024 * 1024 * 64);
 #ifdef _WIN32
-        int res = ::recv(static_cast<SOCKET>(m_handle), (char*)buffer, static_cast<int>(maxLen), 0);
+        int res = ::recv(static_cast<SOCKET>(m_handle), (char*)buffer, static_cast<int>(chunk), 0);
 #else
-        ssize_t res = ::recv(static_cast<int>(m_handle), buffer, maxLen, 0);
+        ssize_t res = ::recv(static_cast<int>(m_handle), buffer, chunk, 0);
 #endif
         if (res < 0) {
             int err = getLastError();
@@ -328,6 +337,7 @@ size_t TcpSocket::recv(uint8_t* buffer, size_t maxLen) {
         return static_cast<size_t>(res);
     }
 }
+
 
 uint16_t TcpSocket::getBoundPort() const {
     if (m_handle == invalid_handle) {

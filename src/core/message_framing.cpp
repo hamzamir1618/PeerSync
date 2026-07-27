@@ -9,6 +9,9 @@ void sendFramedMessage(TcpSocket& sock, const uint8_t* data, size_t len) {
         throw PeerSyncNetworkException("sendFramedMessage: payload size " + std::to_string(len) + 
                                        " exceeds MAX_MESSAGE_SIZE (" + std::to_string(MAX_MESSAGE_SIZE) + ")");
     }
+    if (len > 0 && data == nullptr) {
+        throw PeerSyncNetworkException("sendFramedMessage: data pointer is null with non-zero length " + std::to_string(len));
+    }
 
     uint32_t netLen = static_cast<uint32_t>(len);
     uint8_t prefix[4];
@@ -18,7 +21,7 @@ void sendFramedMessage(TcpSocket& sock, const uint8_t* data, size_t len) {
     prefix[3] = static_cast<uint8_t>(netLen & 0xFF);
 
     sock.send(prefix, 4);
-    if (len > 0 && data != nullptr) {
+    if (len > 0) {
         sock.send(data, len);
     }
 }
@@ -28,9 +31,14 @@ void sendFramedMessage(TcpSocket& sock, const std::vector<uint8_t>& payload) {
 }
 
 static void recvExactly(TcpSocket& sock, uint8_t* buffer, size_t exactLen, const std::string& stage) {
+    if (exactLen == 0) return;
+    if (buffer == nullptr) {
+        throw PeerSyncNetworkException("recvExactly: null buffer with non-zero exactLen");
+    }
     size_t totalReceived = 0;
     while (totalReceived < exactLen) {
         size_t recvd = sock.recv(buffer + totalReceived, exactLen - totalReceived);
+
         if (recvd == 0) {
             if (totalReceived > 0) {
                 throw PeerSyncNetworkException("Connection closed mid-message during " + stage + 

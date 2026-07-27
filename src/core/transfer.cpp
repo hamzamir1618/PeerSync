@@ -483,6 +483,9 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
                         if (!ifs.is_open()) {
                             throw PeerSyncProtocolException("Copy instruction received but no local file open for copying");
                         }
+                        if (currentBlockSize > 0 && inst.blockIndex > UINT64_MAX / currentBlockSize) {
+                            throw PeerSyncProtocolException("Copy instruction block index arithmetic overflow");
+                        }
                         uint64_t offset = inst.blockIndex * currentBlockSize;
                         if (offset >= existingSize && !(existingSize == 0 && offset == 0 && inst.blockIndex == 0)) {
                             throw PeerSyncProtocolException("Copy instruction block index out of bounds");

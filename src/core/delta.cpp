@@ -163,7 +163,7 @@ std::vector<DeltaInstruction> computeDelta(const std::filesystem::path& newFile,
                 instructions.push_back(DeltaInstruction::Literal(std::move(pendingLiteral)));
                 pendingLiteral.clear();
             }
-            if (i + blockSize < fileData.size()) {
+            if (fileData.size() - i > blockSize) {
                 currentWeak = rollAdler32(currentWeak, fileData[i], fileData[i + blockSize], blockSize);
                 i++;
             } else {
@@ -237,6 +237,9 @@ void reconstructFile(const std::filesystem::path& oldFile,
 
     for (const auto& inst : instructions) {
         if (inst.type == DeltaInstructionType::Copy) {
+            if (blockSize > 0 && inst.blockIndex > UINT64_MAX / blockSize) {
+                throw PeerSyncDeltaException("Copy instruction block index arithmetic overflow");
+            }
             uint64_t offset = inst.blockIndex * blockSize;
             if (offset >= oldFileSize && !(oldFileSize == 0 && offset == 0 && inst.blockIndex == 0)) {
                 throw PeerSyncDeltaException("Copy instruction block index out of bounds");

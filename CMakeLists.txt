@@ -9,6 +9,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Options
 option(PEERSYNC_BUILD_TESTS "Build peersync unit tests" ON)
 option(PEERSYNC_BUILD_GUI "Build peersync GUI frontend" ON)
+option(PEERSYNC_ENABLE_SANITIZERS "Enable Address and Undefined Behavior sanitizers" OFF)
+
+if(PEERSYNC_ENABLE_SANITIZERS AND NOT WIN32)
+    message(STATUS "Enabling AddressSanitizer and UndefinedBehaviorSanitizer")
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 
 # Core library
 add_subdirectory(src/core)

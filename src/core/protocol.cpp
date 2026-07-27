@@ -38,13 +38,23 @@ void writeBool(std::vector<uint8_t>& buf, bool val) {
 }
 
 void writeString(std::vector<uint8_t>& buf, const std::string& str) {
+    if (str.size() > UINT32_MAX) {
+        throw PeerSyncProtocolException("String length exceeds UINT32_MAX");
+    }
     writeU32(buf, static_cast<uint32_t>(str.size()));
-    buf.insert(buf.end(), str.begin(), str.end());
+    if (!str.empty()) {
+        buf.insert(buf.end(), str.begin(), str.end());
+    }
 }
 
 void writeBytes(std::vector<uint8_t>& buf, const std::vector<uint8_t>& bytes) {
+    if (bytes.size() > UINT32_MAX) {
+        throw PeerSyncProtocolException("Byte vector length exceeds UINT32_MAX");
+    }
     writeU32(buf, static_cast<uint32_t>(bytes.size()));
-    buf.insert(buf.end(), bytes.begin(), bytes.end());
+    if (!bytes.empty()) {
+        buf.insert(buf.end(), bytes.begin(), bytes.end());
+    }
 }
 
 class BinaryReader {
@@ -57,7 +67,7 @@ public:
     }
 
     uint16_t readU16() {
-        if (m_offset + 2 > m_data.size()) throw PeerSyncProtocolException("Unexpected EOF while reading uint16_t");
+        if (2 > m_data.size() - m_offset) throw PeerSyncProtocolException("Unexpected EOF while reading uint16_t");
         uint16_t val = (static_cast<uint16_t>(m_data[m_offset]) << 8) |
                        (static_cast<uint16_t>(m_data[m_offset + 1]));
         m_offset += 2;
@@ -65,7 +75,7 @@ public:
     }
 
     uint32_t readU32() {
-        if (m_offset + 4 > m_data.size()) throw PeerSyncProtocolException("Unexpected EOF while reading uint32_t");
+        if (4 > m_data.size() - m_offset) throw PeerSyncProtocolException("Unexpected EOF while reading uint32_t");
         uint32_t val = (static_cast<uint32_t>(m_data[m_offset]) << 24) |
                        (static_cast<uint32_t>(m_data[m_offset + 1]) << 16) |
                        (static_cast<uint32_t>(m_data[m_offset + 2]) << 8) |
@@ -75,7 +85,7 @@ public:
     }
 
     uint64_t readU64() {
-        if (m_offset + 8 > m_data.size()) throw PeerSyncProtocolException("Unexpected EOF while reading uint64_t");
+        if (8 > m_data.size() - m_offset) throw PeerSyncProtocolException("Unexpected EOF while reading uint64_t");
         uint64_t val = (static_cast<uint64_t>(m_data[m_offset]) << 56) |
                        (static_cast<uint64_t>(m_data[m_offset + 1]) << 48) |
                        (static_cast<uint64_t>(m_data[m_offset + 2]) << 40) |
@@ -94,7 +104,8 @@ public:
 
     std::string readString() {
         uint32_t len = readU32();
-        if (m_offset + len > m_data.size()) throw PeerSyncProtocolException("Unexpected EOF while reading string of length " + std::to_string(len));
+        if (len > m_data.size() - m_offset) throw PeerSyncProtocolException("Unexpected EOF while reading string of length " + std::to_string(len));
+        if (len == 0) return "";
         std::string str(reinterpret_cast<const char*>(m_data.data() + m_offset), len);
         m_offset += len;
         return str;
@@ -102,11 +113,13 @@ public:
 
     std::vector<uint8_t> readBytes() {
         uint32_t len = readU32();
-        if (m_offset + len > m_data.size()) throw PeerSyncProtocolException("Unexpected EOF while reading byte vector of length " + std::to_string(len));
+        if (len > m_data.size() - m_offset) throw PeerSyncProtocolException("Unexpected EOF while reading byte vector of length " + std::to_string(len));
+        if (len == 0) return {};
         std::vector<uint8_t> bytes(m_data.begin() + m_offset, m_data.begin() + m_offset + len);
         m_offset += len;
         return bytes;
     }
+
 
     bool hasMore() const {
         return m_offset < m_data.size();

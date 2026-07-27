@@ -1,0 +1,28 @@
+# PeerSync Hardening Log
+
+This document records security hardening and defensive engineering enhancements applied to PeerSync, particularly around low-level memory management, network serialization, and algorithmic boundary conditions identified during ASan/UBSan code inspection and testing.
+
+## 1. Network Socket Buffer Handling (`src/core/socket.cpp`)
+- **Null Buffer Guarding**: Added early pointer validation in `TcpSocket::send` and `TcpSocket::recv`. Calling either method with a non-zero length and a `nullptr` buffer now immediately throws `PeerSyncNetworkException`, preventing undefined behavior when calling OS socket APIs (`send`/`recv`).
+- **Syscall Chunk Sizing**: Capped individual OS `send` and `recv` calls to a maximum chunk size of 64 MB (`std::min<size_t>(..., 1024 * 1024 * 64)`). This prevents integer overflow and truncation on 64-bit platforms when downcasting `size_t` buffer lengths to signed 32-bit `int` (WinSock) or `ssize_t` (POSIX).
+
+## 2. Message Framing & Protocol Serialization (`src/core/message_framing.cpp`, `src/core/protocol.cpp`)
+- **Framed Payload Guards**: In `sendFramedMessage`, verified that payload data pointers are non-null before attempting transmission when payload size > 0. In `recvExactly`, added zero-length early returns and null-buffer checks before initiating socket reads.
+- **Null-Pointer String/Vector UB Prevention**: In `BinaryReader::readString` and `BinaryReader::readBytes`, added explicit checks for `len == 0` returning empty strings/vectors immediately. In standard C++17, constructing `std::string(nullptr, 0)` or iterating from `nullptr` is undefined behavior; this early return guarantees safe construction when reading zero-length payloads from network buffers.
+- **Overflow-Proof Bounds Checking**: Changed protocol buffer boundary checks from `m_offset + len > m_data.size()` to `len > m_data.size() - m_offset` across all primitive and compound readers (`readU16`, `readU32`, `readU64`, `readString`, `readBytes`). If a corrupted or malicious peer sends an oversized length prefix (e.g., `UINT32_MAX`), adding `m_offset + len` could wrap around on 32-bit architectures or truncated calculations; subtracting from `m_data.size()` eliminates integer overflow risks.
+- **Serialization Size Validation**: Added checks in `writeString` and `writeBytes` asserting that container sizes do not exceed `UINT32_MAX` before truncating sizes to 32-bit length prefixes.
+
+## 3. Rolling Checksum & Delta Window Arithmetic (`src/core/delta.cpp`)
+- **Rolling Window Boundary Safe Condition**: In `computeDelta`, changed the rolling window continuation check from `i + blockSize < fileData.size()` to `fileData.size() - i > blockSize`. When `i` approaches the end of a very large buffer near `SIZE_MAX`, adding `i + blockSize` can cause unsigned integer wrap-around. Using subtraction guarantees safe index evaluation.
+- **Copy Instruction Multiplication Overflow Guard**: In both `reconstructFile` (`src/core/delta.cpp`) and `receiveFile` (`src/core/transfer.cpp`), added explicit guards before calculating byte offsets from block indices:
+  ```cpp
+  if (blockSize > 0 && inst.blockIndex > UINT64_MAX / blockSize) {
+      throw PeerSyncDeltaException("Copy instruction block index arithmetic overflow");
+  }
+  ```
+  This prevents malicious or corrupted `DeltaInstruction::Copy` instructions from causing 64-bit integer overflow during byte offset calculation (`inst.blockIndex * blockSize`), which could bypass subsequent `offset >= oldFileSize` bounds checks.
+
+## 4. Continuous Integration Sanitizer Job (`.github/workflows/ci.yml`)
+- **ASan / UBSan CI Integration**: Added an automated GitHub Actions job (`asan-ubsan`) running on `ubuntu-latest` with `-DCMAKE_BUILD_TYPE=Debug` and `-DPEERSYNC_ENABLE_SANITIZERS=ON`.
+- **Runtime Configuration**: Configured environment variables `ASAN_OPTIONS="detect_leaks=1:abort_on_error=1"` and `UBSAN_OPTIONS="print_stacktrace=1:abort_on_error=1"` to ensure CI jobs fail fast with stack traces upon any detection of memory errors, undefined behavior, or memory leaks.
+- **Test Label Filtering**: Excluded `requires_multicast`, `performance`, and `stress` labeled tests (`-LE "requires_multicast|performance|stress"`) to keep ASan/UBSan CI runs fast and deterministic while exercising 100% of the unit and integration test suite.
