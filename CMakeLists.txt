@@ -46,3 +46,23 @@ endif()
 if(PEERSYNC_BUILD_FUZZERS)
     add_subdirectory(fuzz)
 endif()
+
+# CPack packaging configuration
+include(GNUInstallDirs)
+
+set(CPACK_PACKAGE_NAME "peersync")
+set(CPACK_PACKAGE_VENDOR "peersync")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Local network offline file & directory synchronization tool")
+set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
+set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
+
+if(WIN32 OR APPLE)
+    set(CPACK_GENERATOR "ZIP")
+else()
+    set(CPACK_GENERATOR "TGZ")
+endif()
+
+include(CPack)

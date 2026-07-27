@@ -65,3 +65,5 @@ target_link_libraries(peersync_gui PRIVATE
 if(WIN32)
     target_link_libraries(peersync_gui PRIVATE comdlg32 ole32)
 endif()
+
+install(TARGETS peersync_gui DESTINATION bin)
