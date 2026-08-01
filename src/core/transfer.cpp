@@ -7,7 +7,18 @@
 #include <algorithm>
 #include <unordered_map>
 #include <random>
+#include <iostream>
+#include <vector>
+#include <atomic>
+#include <chrono>
 #include <xxhash.h>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+
+std::atomic<int> g_metricsCount{0};
+std::vector<int> g_t_recv_syscall_count(100, 0);
+std::vector<double> g_t_recv_syscall_avg(100, 0.0);
 
 namespace {
 
@@ -98,7 +109,7 @@ TransferSession::TransferSession(TcpSocket& socket, Config config)
     }
 }
 
-std::string TransferSession::computeFileHash(const std::filesystem::path& file) {
+std::string TransferSession::computeFileHash(const std::filesystem::path& file, std::function<void(uint64_t processed, uint64_t total)> progressCb) {
     std::error_code ec;
     if (!std::filesystem::exists(file, ec) || ec) {
         throw PeerSyncProtocolException("File does not exist for hashing: " + file.string());
@@ -139,6 +150,13 @@ std::vector<uint8_t> TransferSession::recvMsg() {
 }
 
 bool TransferSession::sendFile(const std::filesystem::path& localFile, const std::string& relativePath) {
+    int sndbuf = 0, rcvbuf = 0;
+    m_socket.getBufferSize(sndbuf, rcvbuf);
+    std::cout << "\n[SOCKET] Sender OS Buffer (Before): SO_SNDBUF=" << sndbuf << ", SO_RCVBUF=" << rcvbuf << "\n";
+    m_socket.setBufferSize(8 * 1024 * 1024);
+    m_socket.getBufferSize(sndbuf, rcvbuf);
+    std::cout << "[SOCKET] Sender OS Buffer (After): SO_SNDBUF=" << sndbuf << ", SO_RCVBUF=" << rcvbuf << "\n";
+
     if (m_config.isCancelled && m_config.isCancelled()) {
         throw PeerSyncProtocolException("Transfer cancelled by user");
     }
@@ -192,14 +210,18 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
         peerSignatures = std::move(respMsg.signatures);
     }
 
-    // 3. Compute delta instructions against peer's signatures
-    auto delta = computeDelta(localFile, peerSignatures, m_config.blockSize);
+    std::vector<DeltaInstruction> deltaInstructions;
+    computeDelta(localFile, peerSignatures, m_config.blockSize, [&](DeltaInstruction inst) {
+        deltaInstructions.push_back(std::move(inst));
+    }, m_config.preTransferProgressCallback ? [this, relativePath](uint64_t p, uint64_t t) {
+        m_config.preTransferProgressCallback("Computing Delta: " + relativePath, p, t);
+    } : std::function<void(uint64_t, uint64_t)>());
 
     if (m_config.onResumeDetected) {
         uint64_t resumedBytes = 0;
         if (isResuming) {
             uint64_t idx = 0;
-            for (const auto& inst : delta) {
+            for (const auto& inst : deltaInstructions) {
                 if (idx++ >= resumeOffset) break;
                 resumedBytes += (inst.type == DeltaInstructionType::Literal) ? inst.bytes.size() : m_config.blockSize;
             }
@@ -214,33 +236,80 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
     uint64_t blockDataSeq = 1; // Sequence 1-indexed for BlockData references
     uint64_t instIndex = 0;
     uint64_t fileBytesProcessed = 0;
+    uint64_t totalBatchesSent = 0;
 
     if (m_config.progressCallback) {
         m_config.progressCallback(m_bytesSent, 0, fileSize);
     }
 
+    std::mutex ackMutex;
+    std::condition_variable ackCv;
+    int inFlight = 0;
+    const int MAX_IN_FLIGHT = 8;
+    std::atomic<bool> ackThreadRunning{true};
+    std::atomic<bool> ackThreadError{false};
+    std::string ackThreadErrorMsg;
+    std::vector<uint8_t> finalCompPayload;
+    
+    std::thread ackThread([&]() {
+        try {
+            while (ackThreadRunning) {
+                // Peek reads the message and puts it into peekBuf
+                std::vector<uint8_t> peekBuf;
+                MessageType type = peekNextMessageType(m_socket, peekBuf);
+                if (type == MessageType::TransferComplete) {
+                    finalCompPayload = std::move(peekBuf);
+                    break;
+                }
+                
+                if (type == MessageType::TransferAck) {
+                    std::lock_guard<std::mutex> lock(ackMutex);
+                    inFlight--;
+                    ackCv.notify_all();
+                } else if (type == MessageType::ErrorMessage) {
+                    ackThreadErrorMsg = "Received error message from receiver";
+                    ackThreadError = true;
+                    ackCv.notify_all();
+                    break;
+                }
+            }
+        } catch (const std::exception& e) {
+            ackThreadErrorMsg = e.what();
+            ackThreadError = true;
+            ackCv.notify_all();
+        }
+    });
+
     auto sendCurrentBatch = [&]() {
         if (m_config.isCancelled && m_config.isCancelled()) {
+            ackThreadRunning = false;
+            m_socket.close();
+            ackThread.join();
             throw PeerSyncProtocolException("Transfer cancelled by user");
         }
-        DeltaInstructionsMessage deltaMsg{relativePath, fileSize, static_cast<uint32_t>(m_config.blockSize), currentBatch};
+        
+        std::unique_lock<std::mutex> lock(ackMutex);
+        ackCv.wait(lock, [&]() { return inFlight < MAX_IN_FLIGHT || ackThreadError; });
+        if (ackThreadError) {
+            ackThreadRunning = false;
+            m_socket.close();
+            ackThread.join();
+            throw PeerSyncProtocolException("Ack thread error: " + ackThreadErrorMsg);
+        }
+        
+        DeltaInstructionsMessage deltaMsg{relativePath, fileSize, static_cast<uint32_t>(m_config.blockSize), totalBatchesSent++, currentBatch};
         sendMsg(serializeMessage(deltaMsg));
+        inFlight++;
+        
         currentBatch.clear();
         currentBatchBytes = 0;
 
-        // Wait for TransferAck
-        auto ackPayload = recvMsg();
-        if (getMessageType(ackPayload) != MessageType::TransferAck) {
-            throw PeerSyncProtocolException("Expected TransferAck message after sending instructions, got type " + std::to_string(static_cast<int>(getMessageType(ackPayload))));
-        }
-        auto ackMsg = deserializeTransferAckMessage(ackPayload);
-        (void)ackMsg; // ACK confirmed by receiver
         if (m_config.progressCallback) {
             m_config.progressCallback(m_bytesSent, std::min(fileBytesProcessed, fileSize), fileSize);
         }
     };
 
-    for (const auto& inst : delta) {
+    for (const auto& inst : deltaInstructions) {
         if (m_config.isCancelled && m_config.isCancelled()) {
             throw PeerSyncProtocolException("Transfer cancelled by user");
         }
@@ -280,16 +349,33 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
         }
     }
 
-    if (!currentBatch.empty() || (delta.empty() && !isResuming)) {
+    if (!currentBatch.empty() || (deltaInstructions.empty() && !isResuming)) {
         sendCurrentBatch();
     }
 
-    // 5. Receive TransferComplete from receiver
-    auto compPayload = recvMsg();
-    if (getMessageType(compPayload) != MessageType::TransferComplete) {
-        throw PeerSyncProtocolException("Expected TransferComplete message, got type " + std::to_string(static_cast<int>(getMessageType(compPayload))));
+    {
+        std::unique_lock<std::mutex> lock(ackMutex);
+        ackCv.wait(lock, [&]() { return inFlight == 0 || ackThreadError; });
     }
-    auto compMsg = deserializeTransferCompleteMessage(compPayload);
+
+    ackThreadRunning = false;
+    if (ackThread.joinable()) {
+        ackThread.join();
+    }
+
+    if (ackThreadError) {
+        throw PeerSyncProtocolException("Ack thread error: " + ackThreadErrorMsg);
+    }
+
+    if (finalCompPayload.empty()) {
+        throw PeerSyncProtocolException("TransferComplete payload is empty (ack thread did not capture it)");
+    }
+
+    if (getMessageType(finalCompPayload) != MessageType::TransferComplete) {
+        throw PeerSyncProtocolException("Expected TransferComplete message, got type " + std::to_string(static_cast<int>(getMessageType(finalCompPayload))));
+    }
+
+    auto compMsg = deserializeTransferCompleteMessage(finalCompPayload);
     if (!compMsg.success || compMsg.finalHash != expectedHash) {
         TransferCompleteMessage failAck{relativePath, false, expectedHash};
         sendMsg(serializeMessage(failAck));
@@ -308,6 +394,14 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
 }
 
 bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
+    int sndbuf = 0, rcvbuf = 0;
+    m_socket.getBufferSize(sndbuf, rcvbuf);
+    std::cout << "\n[SOCKET] Receiver OS Buffer (Before): SO_SNDBUF=" << sndbuf << ", SO_RCVBUF=" << rcvbuf << "\n";
+    m_socket.setBufferSize(8 * 1024 * 1024);
+    m_socket.getBufferSize(sndbuf, rcvbuf);
+    std::cout << "[SOCKET] Receiver OS Buffer (After): SO_SNDBUF=" << sndbuf << ", SO_RCVBUF=" << rcvbuf << "\n";
+
+    double totalOfsWriteTime = 0.0;
     if (m_config.isCancelled && m_config.isCancelled()) {
         throw PeerSyncProtocolException("Transfer cancelled by user");
     }
@@ -464,11 +558,14 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
                 if (!isResuming && isFirstDelta && m_config.onResumeDetected) {
                     m_config.onResumeDetected(relativePath, false, 0, expectedFileSize);
                 }
-                if (!isResuming) {
+                if (!isResuming && isFirstDelta) {
                     journal.expectedSize = expectedFileSize;
                     journal.lastSeq = 0;
                     journal.bytesApplied = 0;
                     saveJournal(journalPath, journal);
+                    if (m_config.testJournalCallback) {
+                        m_config.testJournalCallback(relativePath, journal.bytesApplied, journal.lastSeq);
+                    }
                 }
                 if (deltaMsg.blockSize > 0) {
                     currentBlockSize = deltaMsg.blockSize;

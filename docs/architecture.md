@@ -118,14 +118,15 @@ The destination peer divides its existing version of the file into non-overlappi
 - **Strong Hash (xxHash64)**: A 64-bit non-cryptographic hash (`XXH64`) providing extremely low collision probability to confirm exact block content matches.
 
 These signatures (`BlockSignature`) are sent to the source peer, which constructs an in-memory hash map keyed by weak checksum to enable $O(1)$ average-case candidate block lookups.
+### 3. Delta Sync Algorithm
+peersync uses a rsync-like rolling checksum algorithm to minimize data transfer for modified files.
 
-### 2. Rolling-Window Scanning (`computeDelta`)
-The source peer scans the local modified file byte-by-byte using a sliding window of size `blockSize`:
-1. **$O(1)$ Rolling Updates**: As the window shifts forward by one byte, the Adler-32 checksum is updated in $O(1)$ time (`rollAdler32`) by subtracting the outgoing byte's contribution and adding the incoming byte's contribution without recomputing from scratch.
-2. **Two-Tier Match Verification**: At each window position, the rolling weak checksum is looked up in the signature hash map. On a hit, `xxHash64` is computed over the window and compared against candidate blocks to rule out weak-checksum collisions.
-3. **Copy vs. Literal Emission**:
-   - **On Match**: Any pending unmatched bytes accumulated before this point are emitted as a `Literal` instruction (`DeltaInstructionType::Literal`). Then, a `Copy` instruction (`DeltaInstructionType::Copy`) referencing the matched remote block index is emitted, and the scanning window advances by a full `blockSize`, skipping the matched region entirely.
-   - **On Miss**: The leftmost byte of the window is appended to a pending literal buffer, and the window rolls forward by one byte.
+1. **Sender requests manifest**: The sender asks the receiver for a signature list of the target file.
+2. **Receiver computes signatures**: If the file exists, the receiver splits it into fixed blocks (e.g., 4MB) and computes a weak Adler-32 checksum and a strong xxHash64 hash for each.
+3. **Sender streams delta**: The sender uses a sliding window (bounded-memory stream) over the local file. At each byte, it computes the rolling Adler-32 checksum. If it matches a receiver block, it computes the xxHash64 to confirm.
+   - **Match**: A `Copy` instruction is emitted referencing the receiver's existing block.
+   - **Mismatch**: The byte is appended to a literal buffer. When the buffer reaches a threshold, it's emitted as a `Literal` instruction.
+4. **O(1) Memory Pipeline with Sliding Window Acknowledgment**: Instead of materializing the entire sequence of instructions in memory, instructions are grouped into batches. To prevent the sender from out-pacing a slow receiver or exhausting memory while waiting for disk I/O, transmission is throttled using a **sliding window acknowledgment scheme**. The sender allows up to $W$ batches to be "in flight" (sent but not yet acknowledged) by executing a dedicated background thread to receive acks concurrently. This avoids the severe throughput bottleneck of strict stop-and-wait while keeping the sender's memory footprint strictly bounded (O(W) relative to file size), preventing out-of-memory errors on massive files.
 
 ### Why Rolling Checksums Beat Naive Fixed-Offset Diffing
 A naive diffing algorithm that compares fixed file offsets (e.g., block 0 vs block 0, block 1 vs block 1) fails completely when bytes are **inserted or deleted** anywhere in the file. An insertion of even a single byte shifts all trailing data by one offset, causing all subsequent fixed-offset blocks to mismatch and forcing a full retransmission of unchanged content.
@@ -160,6 +161,12 @@ When a new sync attempt begins for a given file path, `receiveFile` inspects the
 2. **Resume Inquiry**: If the journal is valid, the receiver transmits a `ResumeRequestMessage` (MessageType 10) instead of a standard `ManifestResponseMessage`. This message includes the recorded sequence offset (`lastOffset`), expected file size, and the original block signature vector (`signatures`).
 3. **Sender-Side Skipping**: The sender (`sendFile`) receives the `ResumeRequestMessage`, validates that the file size matches its source file, and responds with a positive `ResumeResponseMessage` (`canResume = true`). It then computes the delta instructions against the receiver's provided signatures and iterates through the instruction list, fast-forwarding and skipping the first `lastOffset` instructions without reading local disk blocks or transmitting payload over the wire.
 4. **Resumption & Commit**: The sender resumes transmitting messages from instruction `lastOffset + 1`. The receiver opens `.peersync-tmp` in append/modify mode (`std::ios::ate | std::ios::in | std::ios::out`) and continues applying incoming instructions from its exact previous point of interruption. Once all bytes are received and verified against the expected file hash, `.peersync-tmp` is atomically renamed over `<targetFile>` and `.peersync-journal` is deleted.
+
+### 3. Sliding Window Flow Control
+To achieve near line-rate gigabit network throughput, **peersync** employs an asynchronous sliding window acknowledgement protocol:
+- **Pipelined Transmission**: Rather than blocking for an acknowledgment after every batch of instructions (Stop-and-Wait ARQ), the sender pushes instruction batches concurrently up to a defined `MAX_IN_FLIGHT` limit (currently 8 batches, each containing up to 64KB or 512KB of instructions).
+- **Asynchronous Acknowledgments**: A dedicated background `ackThread` continuously polls for incoming `TransferAck` messages from the receiver without interrupting the main sender thread's I/O and network transmission loop.
+- **Backpressure & OS Buffers**: The sender utilizes large socket OS buffer allocations (`SO_SNDBUF` / `SO_RCVBUF` scaled to 8MB) to complement the sliding window. If the receiver's disk I/O falls behind, the receiver's OS buffer fills up, naturally exerting TCP backpressure. The sender's `ackThread` stops receiving acks, the in-flight counter hits the limit, and the sender's main thread yields via `std::condition_variable` until the receiver catches up. This prevents the sender from exhausting memory while maximizing throughput.
 
 ## Directory Synchronization & Conflict Resolution
 

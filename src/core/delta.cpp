@@ -6,10 +6,19 @@
 #include <utility>
 #include <xxhash.h>
 #include <random>
+#include <chrono>
+#include <iostream>
+#include <atomic>
 
 namespace peersync {
 
+static std::atomic<size_t> g_adler32CallCount{0};
+
+void resetAdler32CallCount() { g_adler32CallCount = 0; }
+size_t getAdler32CallCount() { return g_adler32CallCount.load(); }
+
 uint32_t computeAdler32(const uint8_t* data, size_t len) {
+    g_adler32CallCount++;
     const uint32_t MOD_ADLER = 65521;
     uint32_t a = 1;
     uint32_t b = 0;
@@ -21,6 +30,7 @@ uint32_t computeAdler32(const uint8_t* data, size_t len) {
 }
 
 uint32_t rollAdler32(uint32_t oldChecksum, uint8_t outByte, uint8_t inByte, size_t winLen) {
+    g_adler32CallCount++;
     const uint32_t MOD_ADLER = 65521;
     uint32_t a = oldChecksum & 0xFFFF;
     uint32_t b = (oldChecksum >> 16) & 0xFFFF;
@@ -36,7 +46,7 @@ uint64_t computeXxHash64(const uint8_t* data, size_t len) {
     return XXH64(data, len, 0);
 }
 
-std::vector<BlockSignature> computeSignatures(const std::filesystem::path& file, size_t blockSize) {
+std::vector<BlockSignature> computeSignatures(const std::filesystem::path& file, size_t blockSize, std::function<void(uint64_t processed, uint64_t total)> progressCb) {
     if (blockSize == 0) {
         throw PeerSyncDeltaException("Block size must be greater than zero");
     }
@@ -48,12 +58,12 @@ std::vector<BlockSignature> computeSignatures(const std::filesystem::path& file,
     }
     std::error_code ec;
     if (!std::filesystem::exists(file, ec) || ec) {
-        throw PeerSyncDeltaException("File does not exist: " + file.string());
+        throw PeerSyncDeltaException("File does not exist: " + file.u8string());
     }
 
     uint64_t fileSize = std::filesystem::file_size(file, ec);
     if (ec) {
-        throw PeerSyncDeltaException("Failed to get file size: " + file.string());
+        throw PeerSyncDeltaException("Failed to get file size: " + file.u8string());
     }
 
     if (fileSize == 0) {
@@ -62,11 +72,12 @@ std::vector<BlockSignature> computeSignatures(const std::filesystem::path& file,
 
     std::ifstream ifs(file, std::ios::binary);
     if (!ifs.is_open()) {
-        throw PeerSyncDeltaException("Failed to open file for reading: " + file.string());
+        throw PeerSyncDeltaException("Failed to open file for reading: " + file.u8string());
     }
 
     std::vector<uint8_t> buffer(blockSize);
     uint64_t blockIndex = 0;
+    uint64_t processed = 0;
 
     while (ifs) {
         ifs.read(reinterpret_cast<char*>(buffer.data()), blockSize);
@@ -80,42 +91,36 @@ std::vector<BlockSignature> computeSignatures(const std::filesystem::path& file,
         sig.strongHash = computeXxHash64(buffer.data(), static_cast<size_t>(bytesRead));
         sig.blockIndex = blockIndex++;
         signatures.push_back(sig);
+
+        processed += bytesRead;
+        if (progressCb) progressCb(processed, fileSize);
     }
 
     return signatures;
 }
 
-std::vector<DeltaInstruction> computeDelta(const std::filesystem::path& newFile,
-                                           const std::vector<BlockSignature>& oldFileSignatures,
-                                           size_t blockSize) {
-    if (blockSize == 0 || blockSize > 1024 * 1024 * 64) {
-        throw PeerSyncDeltaException("Block size must be between 1 and 64 MB");
-    }
-
+void computeDelta(const std::filesystem::path& newFile,
+                  const std::vector<BlockSignature>& oldFileSignatures,
+                  size_t blockSize,
+                  std::function<void(DeltaInstruction)> onInstruction,
+                  std::function<void(uint64_t processed, uint64_t total)> progressCb) {
     std::error_code ec;
     if (!std::filesystem::exists(newFile, ec) || ec) {
-        throw PeerSyncDeltaException("File does not exist: " + newFile.string());
+        throw PeerSyncDeltaException("File does not exist: " + newFile.u8string());
     }
 
     uint64_t fileSize = std::filesystem::file_size(newFile, ec);
     if (ec) {
-        throw PeerSyncDeltaException("Failed to get file size: " + newFile.string());
+        throw PeerSyncDeltaException("Failed to get file size: " + newFile.u8string());
     }
 
-    std::vector<DeltaInstruction> instructions;
     if (fileSize == 0) {
-        return instructions;
+        return;
     }
 
     std::ifstream ifs(newFile, std::ios::binary);
     if (!ifs.is_open()) {
-        throw PeerSyncDeltaException("Failed to open file for reading: " + newFile.string());
-    }
-
-    std::vector<uint8_t> fileData(static_cast<size_t>(fileSize));
-    ifs.read(reinterpret_cast<char*>(fileData.data()), static_cast<std::streamsize>(fileSize));
-    if (ifs.gcount() != static_cast<std::streamsize>(fileSize)) {
-        throw PeerSyncDeltaException("Failed to read complete file: " + newFile.string());
+        throw PeerSyncDeltaException("Failed to open file for reading: " + newFile.u8string());
     }
 
     struct Candidate {
@@ -128,59 +133,132 @@ std::vector<DeltaInstruction> computeDelta(const std::filesystem::path& newFile,
         signatureMap[sig.weakChecksum].push_back({sig.blockIndex, sig.strongHash});
     }
 
+    const size_t CHUNK_SIZE = std::max<size_t>(4 * 1024 * 1024, blockSize * 4); // Read in 4MB chunks
+    std::vector<uint8_t> buffer;
+    buffer.reserve(CHUNK_SIZE + blockSize);
+    
+    std::vector<uint8_t> readBuf(CHUNK_SIZE);
+    ifs.read(reinterpret_cast<char*>(readBuf.data()), CHUNK_SIZE);
+    std::streamsize bytesRead = ifs.gcount();
+    buffer.insert(buffer.end(), readBuf.begin(), readBuf.begin() + bytesRead);
+
     size_t i = 0;
     std::vector<uint8_t> pendingLiteral;
     uint32_t currentWeak = 0;
     bool haveRollingChecksum = false;
+    uint64_t lastReported = 0;
+    size_t matchCount = 0;
+    uint64_t totalProcessed = 0; // Total bytes completely processed (advanced past `i`)
 
-    while (i < fileData.size()) {
-        size_t winLen = std::min(blockSize, fileData.size() - i);
+    auto deltaStartTime = std::chrono::steady_clock::now();
 
-        if (!haveRollingChecksum) {
-            currentWeak = computeAdler32(&fileData[i], winLen);
-            haveRollingChecksum = true;
-        }
+    uint64_t rollingChecksumComputations = 0;
+    bool fastPathTaken = false;
 
-        bool matched = false;
-        auto it = signatureMap.find(currentWeak);
-        if (it != signatureMap.end()) {
-            uint64_t strongHash = computeXxHash64(&fileData[i], winLen);
-            for (const auto& candidate : it->second) {
-                if (candidate.strongHash == strongHash) {
-                    if (!pendingLiteral.empty()) {
-                        instructions.push_back(DeltaInstruction::Literal(std::move(pendingLiteral)));
-                        pendingLiteral.clear();
-                    }
-                    instructions.push_back(DeltaInstruction::Copy(candidate.blockIndex));
-                    i += winLen;
-                    haveRollingChecksum = false;
-                    matched = true;
-                    break;
+    if (signatureMap.empty()) {
+        fastPathTaken = true;
+        // Fast path for completely new files (no signatures to match against)
+        while (i < buffer.size()) {
+            if (buffer.size() - i <= blockSize && ifs.good() && !ifs.eof()) {
+                buffer.erase(buffer.begin(), buffer.begin() + i);
+                totalProcessed += i;
+                i = 0;
+                ifs.read(reinterpret_cast<char*>(readBuf.data()), CHUNK_SIZE);
+                bytesRead = ifs.gcount();
+                if (bytesRead > 0) {
+                    buffer.insert(buffer.end(), readBuf.begin(), readBuf.begin() + bytesRead);
                 }
             }
-        }
-
-        if (!matched) {
-            pendingLiteral.push_back(fileData[i]);
-            if (pendingLiteral.size() >= std::max<size_t>(65536, blockSize)) {
-                instructions.push_back(DeltaInstruction::Literal(std::move(pendingLiteral)));
-                pendingLiteral.clear();
+            
+            size_t winLen = std::min(blockSize, buffer.size() - i);
+            if (winLen == 0) break;
+            
+            std::vector<uint8_t> chunk(buffer.begin() + i, buffer.begin() + i + winLen);
+            onInstruction(DeltaInstruction::Literal(std::move(chunk)));
+            
+            i += winLen;
+            uint64_t currentAbsolutePos = totalProcessed + i;
+            if (progressCb && (currentAbsolutePos - lastReported >= 1024 * 1024 || currentAbsolutePos == fileSize)) {
+                progressCb(currentAbsolutePos, fileSize);
+                lastReported = currentAbsolutePos;
             }
-            if (fileData.size() - i > blockSize) {
-                currentWeak = rollAdler32(currentWeak, fileData[i], fileData[i + blockSize], blockSize);
-                i++;
-            } else {
-                i++;
-                haveRollingChecksum = false;
+        }
+    } else {
+        // Standard rolling hash byte-by-byte delta logic
+        while (i < buffer.size()) {
+            if (buffer.size() - i <= blockSize && ifs.good() && !ifs.eof()) {
+                buffer.erase(buffer.begin(), buffer.begin() + i);
+                totalProcessed += i;
+                i = 0;
+
+                ifs.read(reinterpret_cast<char*>(readBuf.data()), CHUNK_SIZE);
+                bytesRead = ifs.gcount();
+                if (bytesRead > 0) {
+                    buffer.insert(buffer.end(), readBuf.begin(), readBuf.begin() + bytesRead);
+                }
+            }
+
+            size_t winLen = std::min(blockSize, buffer.size() - i);
+
+            if (!haveRollingChecksum) {
+                currentWeak = computeAdler32(&buffer[i], winLen);
+                haveRollingChecksum = true;
+            }
+
+            bool matched = false;
+            auto it = signatureMap.find(currentWeak);
+            if (it != signatureMap.end()) {
+                uint64_t strongHash = computeXxHash64(&buffer[i], winLen);
+                for (const auto& candidate : it->second) {
+                    if (candidate.strongHash == strongHash) {
+                        if (!pendingLiteral.empty()) {
+                            onInstruction(DeltaInstruction::Literal(std::move(pendingLiteral)));
+                            pendingLiteral.clear();
+                        }
+                        onInstruction(DeltaInstruction::Copy(candidate.blockIndex));
+                        i += winLen;
+                        haveRollingChecksum = false;
+                        matched = true;
+                        matchCount++;
+                        break;
+                    }
+                }
+            }
+
+            if (!matched) {
+                pendingLiteral.push_back(buffer[i]);
+                if (pendingLiteral.size() >= std::max<size_t>(65536, blockSize)) {
+                    onInstruction(DeltaInstruction::Literal(std::move(pendingLiteral)));
+                    pendingLiteral.clear();
+                }
+                if (buffer.size() - i > blockSize) {
+                    currentWeak = rollAdler32(currentWeak, buffer[i], buffer[i + blockSize], blockSize);
+                    rollingChecksumComputations++;
+                    i++;
+                } else {
+                    i++;
+                    haveRollingChecksum = false;
+                }
+            }
+
+            uint64_t currentAbsolutePos = totalProcessed + i;
+            if (progressCb && (currentAbsolutePos - lastReported >= 1024 * 1024 || currentAbsolutePos == fileSize)) {
+                progressCb(currentAbsolutePos, fileSize);
+                lastReported = currentAbsolutePos;
             }
         }
     }
 
     if (!pendingLiteral.empty()) {
-        instructions.push_back(DeltaInstruction::Literal(std::move(pendingLiteral)));
+        onInstruction(DeltaInstruction::Literal(std::move(pendingLiteral)));
     }
 
-    return instructions;
+    auto deltaEndTime = std::chrono::steady_clock::now();
+    std::chrono::duration<double> elapsedDelta = deltaEndTime - deltaStartTime;
+    std::cerr << "\n[INSTRUMENTATION] computeDelta: Finished in " << elapsedDelta.count() << " seconds.\n";
+    std::cerr << "[INSTRUMENTATION] computeDelta: Rolling checksum match count = " << matchCount << "\n";
+    std::cerr << "[INSTRUMENTATION] computeDelta: Fast path taken = " << (fastPathTaken ? "YES" : "NO") << "\n";
+    std::cerr << "[INSTRUMENTATION] computeDelta: Rolling checksum computations = " << rollingChecksumComputations << "\n";
 }
 
 void reconstructFile(const std::filesystem::path& oldFile,
@@ -193,12 +271,12 @@ void reconstructFile(const std::filesystem::path& oldFile,
 
     std::error_code ec;
     if (!std::filesystem::exists(oldFile, ec) || ec) {
-        throw PeerSyncDeltaException("Old file does not exist: " + oldFile.string());
+        throw PeerSyncDeltaException("Old file does not exist: " + oldFile.u8string());
     }
 
     uint64_t oldFileSize = std::filesystem::file_size(oldFile, ec);
     if (ec) {
-        throw PeerSyncDeltaException("Failed to get old file size: " + oldFile.string());
+        throw PeerSyncDeltaException("Failed to get old file size: " + oldFile.u8string());
     }
 
     std::filesystem::path parentDir = outputFile.parent_path();
@@ -208,12 +286,12 @@ void reconstructFile(const std::filesystem::path& oldFile,
     if (!std::filesystem::exists(parentDir, ec)) {
         std::filesystem::create_directories(parentDir, ec);
         if (ec) {
-            throw PeerSyncDeltaException("Failed to create parent directory for output file: " + outputFile.string());
+            throw PeerSyncDeltaException("Failed to create parent directory for output file: " + outputFile.u8string());
         }
     }
 
     std::random_device rd;
-    std::filesystem::path tempPath = parentDir / (outputFile.filename().string() + ".tmp." + std::to_string(rd()));
+    std::filesystem::path tempPath = parentDir / (outputFile.filename().u8string() + ".tmp." + std::to_string(rd()));
 
     struct TempFileGuard {
         std::filesystem::path path;
@@ -228,12 +306,12 @@ void reconstructFile(const std::filesystem::path& oldFile,
 
     std::ifstream ifs(oldFile, std::ios::binary);
     if (!ifs.is_open()) {
-        throw PeerSyncDeltaException("Failed to open old file for reading: " + oldFile.string());
+        throw PeerSyncDeltaException("Failed to open old file for reading: " + oldFile.u8string());
     }
 
     std::ofstream ofs(tempPath, std::ios::binary);
     if (!ofs.is_open()) {
-        throw PeerSyncDeltaException("Failed to open temporary file for writing: " + tempPath.string());
+        throw PeerSyncDeltaException("Failed to open temporary file for writing: " + tempPath.u8string());
     }
 
     std::vector<uint8_t> buffer(blockSize);

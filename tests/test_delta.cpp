@@ -35,6 +35,14 @@ protected:
         return std::vector<uint8_t>(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
     }
 
+        std::vector<peersync::DeltaInstruction> computeDeltaVector(const fs::path& file, const std::vector<peersync::BlockSignature>& sigs, size_t blockSize) {
+        std::vector<peersync::DeltaInstruction> delta;
+        peersync::computeDelta(file, sigs, blockSize, [&](const peersync::DeltaInstruction& inst) {
+            delta.push_back(inst);
+        });
+        return delta;
+    }
+
     fs::path testDir_;
 };
 
@@ -165,7 +173,7 @@ TEST_F(DeltaTest, IdenticalFileProducesPureCopyInstructions) {
     fs::path file = createTempFile("identical.bin", data);
 
     auto sigs = peersync::computeSignatures(file, 100);
-    auto delta = peersync::computeDelta(file, sigs, 100);
+    auto delta = computeDeltaVector(file, sigs, 100);
 
     ASSERT_EQ(delta.size(), 5u);
     for (size_t i = 0; i < delta.size(); ++i) {
@@ -189,7 +197,7 @@ TEST_F(DeltaTest, OneByteChangedProducesSmallMinorityOfLiteralInstructions) {
     fs::path newFile = createTempFile("new_change.bin", newData);
 
     auto sigs = peersync::computeSignatures(oldFile, 100);
-    auto delta = peersync::computeDelta(newFile, sigs, 100);
+    auto delta = computeDeltaVector(newFile, sigs, 100);
 
     uint64_t totalBytesCovered = 0;
     uint64_t literalBytes = 0;
@@ -230,7 +238,7 @@ TEST_F(DeltaTest, InsertedBytesResyncsRollingWindow) {
     fs::path newFile = createTempFile("new_insert.bin", newData);
 
     auto sigs = peersync::computeSignatures(oldFile, 100);
-    auto delta = peersync::computeDelta(newFile, sigs, 100);
+    auto delta = computeDeltaVector(newFile, sigs, 100);
 
     uint64_t totalBytesCovered = 0;
     std::vector<uint64_t> copiedBlocks;
@@ -264,7 +272,7 @@ TEST_F(DeltaTest, UnrelatedFileProducesAllLiteralInstructions) {
     fs::path newFile = createTempFile("new_unrelated.bin", newData);
 
     auto sigs = peersync::computeSignatures(oldFile, 100);
-    auto delta = peersync::computeDelta(newFile, sigs, 100);
+    auto delta = computeDeltaVector(newFile, sigs, 100);
 
     uint64_t totalLiteralBytes = 0;
     for (const auto& inst : delta) {
@@ -282,7 +290,7 @@ TEST_F(DeltaTest, RoundTripIdenticalFiles) {
     fs::path outputFile = testDir_ / "rt_ident_out.bin";
 
     auto sigs = peersync::computeSignatures(oldFile, 64);
-    auto delta = peersync::computeDelta(newFile, sigs, 64);
+    auto delta = computeDeltaVector(newFile, sigs, 64);
     peersync::reconstructFile(oldFile, delta, outputFile, 64);
 
     EXPECT_EQ(readFileBytes(outputFile), data);
@@ -299,7 +307,7 @@ TEST_F(DeltaTest, RoundTripSmallEdit) {
     fs::path outputFile = testDir_ / "rt_edit_out.bin";
 
     auto sigs = peersync::computeSignatures(oldFile, 64);
-    auto delta = peersync::computeDelta(newFile, sigs, 64);
+    auto delta = computeDeltaVector(newFile, sigs, 64);
     peersync::reconstructFile(oldFile, delta, outputFile, 64);
 
     EXPECT_EQ(readFileBytes(outputFile), newData);
@@ -317,7 +325,7 @@ TEST_F(DeltaTest, RoundTripInsertion) {
     fs::path outputFile = testDir_ / "rt_ins_out.bin";
 
     auto sigs = peersync::computeSignatures(oldFile, 64);
-    auto delta = peersync::computeDelta(newFile, sigs, 64);
+    auto delta = computeDeltaVector(newFile, sigs, 64);
     peersync::reconstructFile(oldFile, delta, outputFile, 64);
 
     EXPECT_EQ(readFileBytes(outputFile), newData);
@@ -332,7 +340,7 @@ TEST_F(DeltaTest, RoundTripCompletelyDifferentContent) {
     fs::path outputFile = testDir_ / "rt_diff_out.bin";
 
     auto sigs = peersync::computeSignatures(oldFile, 64);
-    auto delta = peersync::computeDelta(newFile, sigs, 64);
+    auto delta = computeDeltaVector(newFile, sigs, 64);
     peersync::reconstructFile(oldFile, delta, outputFile, 64);
 
     EXPECT_EQ(readFileBytes(outputFile), newData);
@@ -347,7 +355,7 @@ TEST_F(DeltaTest, RoundTripEmptyOldFile) {
     fs::path outputFile = testDir_ / "rt_empty_old_out.bin";
 
     auto sigs = peersync::computeSignatures(oldFile, 64);
-    auto delta = peersync::computeDelta(newFile, sigs, 64);
+    auto delta = computeDeltaVector(newFile, sigs, 64);
     peersync::reconstructFile(oldFile, delta, outputFile, 64);
 
     EXPECT_EQ(readFileBytes(outputFile), newData);
@@ -362,7 +370,7 @@ TEST_F(DeltaTest, RoundTripEmptyNewFile) {
     fs::path outputFile = testDir_ / "rt_empty_new_out.bin";
 
     auto sigs = peersync::computeSignatures(oldFile, 64);
-    auto delta = peersync::computeDelta(newFile, sigs, 64);
+    auto delta = computeDeltaVector(newFile, sigs, 64);
     peersync::reconstructFile(oldFile, delta, outputFile, 64);
 
     EXPECT_TRUE(fs::exists(outputFile));

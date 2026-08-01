@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <peersync/transfer.h>
+#include <peersync/delta.h>
 #include <peersync/socket.h>
 #include <peersync/exceptions.h>
 #include <peersync/message_framing.h>
@@ -51,6 +52,8 @@ protected:
 TEST_F(TransferTest, SyncNewFileToEmptyPeer) {
     std::filesystem::path senderFile = senderDir / "new_file.dat";
     createTestFile(senderFile, 15000, 42); // 15 KB file
+    
+    peersync::resetAdler32CallCount();
 
     peersync::TcpSocket server = peersync::TcpSocket::listen(0, "127.0.0.1");
     uint16_t port = server.getBoundPort();
@@ -109,6 +112,8 @@ TEST_F(TransferTest, SyncNewFileToEmptyPeer) {
     auto receiverBytes = readFileBytes(targetFile);
     EXPECT_EQ(senderBytes, receiverBytes) << "Reconstructed file must be byte-for-byte identical";
     EXPECT_EQ(senderSession.getFinalHash(), receiverHash);
+    
+    EXPECT_EQ(peersync::getAdler32CallCount(), 0) << "Fast path must bypass computeAdler32 entirely when signature list is empty";
 }
 
 TEST_F(TransferTest, SyncUpdatedFileToPartialPeerTransmitsMeaningfullyLessData) {
@@ -323,11 +328,14 @@ TEST_F(TransferTest, ResumableSyncAfterInterruption) {
         auto respPayload = peersync::recvFramedMessage(client);
         auto respMsg = peersync::deserializeManifestResponseMessage(respPayload);
 
-        auto delta = peersync::computeDelta(senderFile, respMsg.signatures, config.blockSize);
+        std::vector<peersync::DeltaInstruction> delta;
+        peersync::computeDelta(senderFile, respMsg.signatures, config.blockSize, [&](const peersync::DeltaInstruction& inst) {
+            delta.push_back(inst);
+        });
         ASSERT_GT(delta.size(), 15u);
 
         std::vector<peersync::DeltaInstruction> firstBatch(delta.begin(), delta.begin() + 10);
-        peersync::DeltaInstructionsMessage deltaMsg{"resume.dat", static_cast<uint64_t>(contentBytes.size()), static_cast<uint32_t>(config.blockSize), firstBatch};
+        peersync::DeltaInstructionsMessage deltaMsg{"resume.dat", static_cast<uint64_t>(contentBytes.size()), static_cast<uint32_t>(config.blockSize), 1, firstBatch};
         peersync::sendFramedMessage(client, peersync::serializeMessage(deltaMsg));
 
         auto ackPayload = peersync::recvFramedMessage(client);
@@ -449,4 +457,198 @@ TEST_F(TransferTest, StaleJournalFallbackToFreshSync) {
 
     auto receivedBytes = readFileBytes(targetFile);
     EXPECT_EQ(receivedBytes, contentBytes);
+}
+
+TEST_F(TransferTest, BoundedMemoryStreaming) {
+    auto generateLargeFile = [&](const std::filesystem::path& path, size_t sizeMB) {
+        std::ofstream ofs(path, std::ios::binary);
+        std::vector<uint8_t> chunk(1024 * 1024, 0x42);
+        for (size_t i = 0; i < sizeMB; ++i) {
+            ofs.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
+        }
+    };
+
+    auto runTransfer = [&](size_t sizeMB) -> size_t {
+        std::filesystem::path senderFile = senderDir / ("test_" + std::to_string(sizeMB) + "MB.dat");
+        generateLargeFile(senderFile, sizeMB);
+
+        peersync::TcpSocket server = peersync::TcpSocket::listen(0, "127.0.0.1");
+        uint16_t port = server.getBoundPort();
+
+        peersync::TcpSocket acceptedSocket;
+        std::thread acceptThread([&]() {
+            acceptedSocket = server.accept();
+        });
+        peersync::TcpSocket client = peersync::TcpSocket::connect("127.0.0.1", port);
+        if (acceptThread.joinable()) {
+            acceptThread.join();
+        }
+
+        peersync::TransferSession::Config config;
+        config.blockSize = 256 * 1024;
+        config.literalThreshold = 512 * 1024;
+        
+        std::atomic<size_t> peakLiteralBytes{0};
+        config.preBatchSendCallback = [&](size_t instrCount, size_t literalBytes) {
+            size_t currentPeak = peakLiteralBytes.load();
+            while (literalBytes > currentPeak && !peakLiteralBytes.compare_exchange_weak(currentPeak, literalBytes)) {}
+        };
+
+        std::thread receiverThread([&]() {
+            peersync::TransferSession session(acceptedSocket, config);
+            session.receiveFile(receiverDir);
+        });
+
+        peersync::TransferSession senderSession(client, config);
+        senderSession.sendFile(senderFile, senderFile.filename().u8string());
+
+        if (receiverThread.joinable()) {
+            receiverThread.join();
+        }
+        return peakLiteralBytes.load();
+    };
+
+    // Test with 10MB and 50MB (using 50MB vs 500MB might take too long in a CI pipeline, 10 vs 50 is enough to prove O(1) vs O(N))
+    size_t peak10MB = runTransfer(10);
+    size_t peak50MB = runTransfer(50);
+
+    // If memory is O(N), peak50MB would be ~5x peak10MB.
+    // If memory is bounded, they should be exactly the same or very close (e.g. within a chunk size).
+    EXPECT_LE(peak50MB, peak10MB * 1.5);
+    EXPECT_LE(peak50MB, 2 * 1024 * 1024); // Bounded strictly below 2MB in-flight
+}
+
+TEST_F(TransferTest, AckDelayMemoryBound) {
+    std::filesystem::path senderFile = senderDir / "ack_delay_sender.bin";
+    std::filesystem::path receiverFile = receiverDir / "ack_delay_sender.bin";
+    
+    // Generate a 5MB file
+    {
+        std::ofstream ofs(senderFile, std::ios::binary);
+        std::vector<char> zeros(1024 * 1024, 0);
+        for (int i = 0; i < 5; ++i) {
+            ofs.write(zeros.data(), zeros.size());
+        }
+    }
+
+    peersync::TcpSocket server = peersync::TcpSocket::listen(0, "127.0.0.1");
+    uint16_t port = server.getBoundPort();
+
+    peersync::TcpSocket acceptedSocket;
+    std::thread acceptThread([&]() {
+        acceptedSocket = server.accept();
+    });
+    peersync::TcpSocket client = peersync::TcpSocket::connect("127.0.0.1", port);
+    if (acceptThread.joinable()) {
+        acceptThread.join();
+    }
+
+    peersync::TransferSession::Config config;
+    config.blockSize = 256 * 1024;
+    config.literalThreshold = 512 * 1024;
+    config.ackDelayMs = 50; // Inject 50ms artificial delay before each ack
+    
+    std::atomic<size_t> peakLiteralBytes{0};
+    config.preBatchSendCallback = [&](size_t instrCount, size_t literalBytes) {
+        size_t currentPeak = peakLiteralBytes.load();
+        while (literalBytes > currentPeak && !peakLiteralBytes.compare_exchange_weak(currentPeak, literalBytes)) {}
+    };
+
+    std::thread receiverThread([&]() {
+        peersync::TransferSession session(acceptedSocket, config);
+        session.receiveFile(receiverDir);
+    });
+
+    peersync::TransferSession senderSession(client, config);
+    bool senderSuccess = senderSession.sendFile(senderFile, senderFile.filename().u8string());
+
+    if (receiverThread.joinable()) {
+        receiverThread.join();
+    }
+
+    EXPECT_TRUE(senderSuccess);
+    EXPECT_LE(peakLiteralBytes.load(), 2 * 1024 * 1024); // Hard cap on peak memory remains bounded
+
+    // Strong hash verification (byte-for-byte comparison of the fully reconstructed file)
+    EXPECT_EQ(readFileBytes(senderFile), readFileBytes(receiverFile));
+}
+
+TEST_F(TransferTest, MonotonicJournalMultiFile) {
+    std::filesystem::path file1 = senderDir / "file1.dat";
+    std::filesystem::path file2 = senderDir / "file2.dat";
+    createTestFile(file1, 3 * 1024 * 1024, 10);
+    createTestFile(file2, 2 * 1024 * 1024, 20);
+
+    peersync::TcpSocket server = peersync::TcpSocket::listen(0, "127.0.0.1");
+    uint16_t port = server.getBoundPort();
+
+    peersync::TcpSocket acceptedSocket;
+    std::thread acceptThread([&]() {
+        acceptedSocket = server.accept();
+    });
+
+    peersync::TcpSocket client = peersync::TcpSocket::connect("127.0.0.1", port);
+    if (acceptThread.joinable()) {
+        acceptThread.join();
+    }
+
+    ASSERT_TRUE(client.isValid());
+    ASSERT_TRUE(acceptedSocket.isValid());
+
+    bool receiverSuccess = false;
+    std::string receiverError;
+
+    std::thread receiverThread([&]() {
+        try {
+            peersync::TransferSession::Config cfg;
+            
+            std::map<std::string, uint64_t> lastBytesMap;
+            std::map<std::string, uint64_t> lastSeqMap;
+            std::atomic<bool> monotonicFailure{false};
+
+            cfg.testJournalCallback = [&](const std::string& path, uint64_t bytesApplied, uint64_t lastSeq) {
+                if (lastBytesMap.find(path) != lastBytesMap.end()) {
+                    if (bytesApplied < lastBytesMap[path] || lastSeq < lastSeqMap[path]) {
+                        monotonicFailure = true;
+                    }
+                }
+                lastBytesMap[path] = bytesApplied;
+                lastSeqMap[path] = lastSeq;
+            };
+
+            peersync::TransferSession session(acceptedSocket, cfg);
+            receiverSuccess = session.receiveFile(receiverDir);
+            if (receiverSuccess) {
+                receiverSuccess = session.receiveFile(receiverDir);
+            }
+            if (monotonicFailure) {
+                receiverError = "Monotonic journal failure detected";
+                receiverSuccess = false;
+            }
+        } catch (const std::exception& e) {
+            receiverSuccess = false;
+            receiverError = e.what();
+        }
+        acceptedSocket.close();
+    });
+
+    peersync::TransferSession senderSession(client);
+    bool senderSuccess = false;
+    try {
+        senderSuccess = senderSession.sendFile(file1, "file1.dat");
+        if (senderSuccess) {
+            senderSuccess = senderSession.sendFile(file2, "file2.dat");
+        }
+    } catch (const std::exception& e) {
+        client.close();
+        FAIL() << "Sender exception: " << e.what();
+    }
+    client.close();
+
+    if (receiverThread.joinable()) {
+        receiverThread.join();
+    }
+
+    ASSERT_TRUE(senderSuccess);
+    ASSERT_TRUE(receiverSuccess) << "Receiver error: " << receiverError;
 }

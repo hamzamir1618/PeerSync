@@ -129,7 +129,10 @@ TEST_F(PerfDeltaTest, InMemoryDeltaEngineBenchmark) {
     auto t1 = clock::now();
 
     std::cout << "[PerfDeltaTest] Running computeDelta..." << std::endl;
-    auto deltas = peersync::computeDelta(modPath, sigs, blockSize);
+    std::vector<peersync::DeltaInstruction> deltas;
+    peersync::computeDelta(modPath, sigs, blockSize, [&](const peersync::DeltaInstruction& inst) {
+        deltas.push_back(inst);
+    });
     auto t2 = clock::now();
 
     std::cout << "[PerfDeltaTest] Running reconstructFile..." << std::endl;
