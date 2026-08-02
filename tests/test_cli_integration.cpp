@@ -300,6 +300,18 @@ struct Subprocess {
         return m_capturedOutput;
     }
 
+    void drainOutput() {
+        if (fdRead < 0) return;
+        int flags = fcntl(fdRead, F_GETFL, 0);
+        fcntl(fdRead, F_SETFL, flags | O_NONBLOCK);
+        char buf[4096];
+        ssize_t n = 0;
+        while ((n = read(fdRead, buf, sizeof(buf))) > 0) {
+            m_capturedOutput.append(buf, n);
+        }
+        fcntl(fdRead, F_SETFL, flags);
+    }
+
     void interrupt() {
         if (valid && pid > 0) {
             kill(pid, SIGTERM);

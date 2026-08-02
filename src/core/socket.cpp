@@ -115,7 +115,11 @@ void TcpSocket::getBufferSize(int& sndbuf, int& rcvbuf) const {
     sndbuf = 0;
     rcvbuf = 0;
     if (m_handle == invalid_handle) return;
+#ifdef _WIN32
     int len = sizeof(int);
+#else
+    socklen_t len = sizeof(int);
+#endif
     ::getsockopt(static_cast<os_socket_t>(m_handle), SOL_SOCKET, SO_SNDBUF, (char*)&sndbuf, &len);
     len = sizeof(int);
     ::getsockopt(static_cast<os_socket_t>(m_handle), SOL_SOCKET, SO_RCVBUF, (char*)&rcvbuf, &len);
