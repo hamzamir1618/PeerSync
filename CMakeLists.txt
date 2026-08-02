@@ -66,8 +66,3 @@ else()
 endif()
 
 include(CPack)
-
-add_executable(test_pingpong test_pingpong.cpp)
-target_link_libraries(test_pingpong PRIVATE peersync_core)
-
-target_include_directories(test_pingpong PRIVATE src)
