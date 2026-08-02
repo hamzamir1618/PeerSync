@@ -12,9 +12,13 @@
 #include <filesystem>
 #include <memory>
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
+#include "IconsFontAwesome6.h"
+#include "fa_solid_900.h"
 #include <GLFW/glfw3.h>
 
 #include <peersync/discovery.h>
@@ -89,11 +93,24 @@ public:
         }
     }
 
+    void cancelAsync() {
+        m_cancelRequested.store(true);
+        std::lock_guard<std::mutex> lock(m_socketMutex);
+        if (m_activeSocket) {
+            m_activeSocket->close();
+        }
+    }
+
+    bool isFinished() const {
+        return m_isFinished.load();
+    }
+
     void reset() {
         stop();
         std::lock_guard<std::mutex> lock(m_mutex);
         m_stats = Stats{};
         m_cancelRequested.store(false);
+        m_isFinished.store(true);
     }
 
     Stats getStats() const {
@@ -116,6 +133,9 @@ private:
     mutable std::mutex m_mutex;
     Stats m_stats;
     std::atomic<bool> m_cancelRequested{false};
+    std::atomic<bool> m_isFinished{true};
+    std::mutex m_socketMutex;
+    peersync::TcpSocket* m_activeSocket{nullptr};
 
     void updateState(State state, const std::string& msg) {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -144,10 +164,30 @@ private:
         }
     }
 
+    struct ActiveSocketGuard {
+        TransferWorker& worker;
+        ActiveSocketGuard(TransferWorker& w, peersync::TcpSocket* sock) : worker(w) {
+            std::lock_guard<std::mutex> lock(worker.m_socketMutex);
+            worker.m_activeSocket = sock;
+        }
+        ~ActiveSocketGuard() {
+            std::lock_guard<std::mutex> lock(worker.m_socketMutex);
+            worker.m_activeSocket = nullptr;
+        }
+    };
+
+    struct FinishedGuard {
+        TransferWorker& worker;
+        FinishedGuard(TransferWorker& w) : worker(w) { worker.m_isFinished.store(false); }
+        ~FinishedGuard() { worker.m_isFinished.store(true); }
+    };
+
     void runInitiator(std::string ip, uint16_t port, std::string pin, bool isDir, std::string path, bool allowResume) {
+        FinishedGuard fGuard(*this);
         try {
             updateState(State::Connecting, "Connecting to " + ip + ":" + std::to_string(port) + "...");
             peersync::TcpSocket client = peersync::TcpSocket::connect(ip, port);
+            ActiveSocketGuard sGuard(*this, &client);
 
             updateState(State::Pairing, "Connected! Performing secure PIN pairing...");
             peersync::PairingSession pairing(peersync::PairingRole::Initiator, pin);
@@ -183,6 +223,7 @@ private:
     }
 
     void runResponder(uint16_t port, std::string pin, bool isDir, std::string path, bool allowResume) {
+        FinishedGuard fGuard(*this);
         try {
             updateState(State::Connecting, "Binding listening socket on port " + std::to_string(port) + "...");
             peersync::TcpSocket server = peersync::TcpSocket::listen(port, "0.0.0.0");
@@ -193,11 +234,14 @@ private:
             }
 
             peersync::TcpSocket client;
-            while (!client.isValid() && !m_cancelRequested.load()) {
-                try {
-                    client = server.accept();
-                } catch (...) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            {
+                ActiveSocketGuard sGuard(*this, &server);
+                while (!client.isValid() && !m_cancelRequested.load()) {
+                    try {
+                        client = server.accept();
+                    } catch (...) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    }
                 }
             }
             if (!client.isValid() || m_cancelRequested.load()) {
@@ -206,6 +250,7 @@ private:
             }
             server.close();
 
+            ActiveSocketGuard sGuardClient(*this, &client);
             updateState(State::Pairing, "Client connected! Performing PIN authentication...");
             auto firstMsg = peersync::recvFramedMessage(client);
             if (peersync::getMessageType(firstMsg) != peersync::MessageType::PairChallenge) {
@@ -440,6 +485,52 @@ public:
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO(); (void)io;
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        ImFontConfig config;
+        config.MergeMode = true;
+        config.PixelSnapH = true;
+        config.FontDataOwnedByAtlas = false;
+        static const ImWchar icon_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
+
+        m_fontRegular = io.Fonts->AddFontFromFileTTF("build/_deps/imgui-src/misc/fonts/Roboto-Medium.ttf", 16.0f);
+        if (m_fontRegular) {
+            io.Fonts->AddFontFromMemoryTTF((void*)fa_solid_900_ttf, fa_solid_900_ttf_len, 16.0f, &config, icon_ranges);
+        } else {
+            m_fontRegular = io.Fonts->AddFontDefault();
+            io.Fonts->AddFontFromMemoryTTF((void*)fa_solid_900_ttf, fa_solid_900_ttf_len, 13.0f, &config, icon_ranges);
+        }
+
+        m_fontTitle = io.Fonts->AddFontFromFileTTF("build/_deps/imgui-src/misc/fonts/Roboto-Medium.ttf", 24.0f);
+        if (m_fontTitle) {
+            io.Fonts->AddFontFromMemoryTTF((void*)fa_solid_900_ttf, fa_solid_900_ttf_len, 24.0f, &config, icon_ranges);
+        } else {
+            m_fontTitle = m_fontRegular;
+        }
+
+        m_fontMetadata = io.Fonts->AddFontFromFileTTF("build/_deps/imgui-src/misc/fonts/Roboto-Medium.ttf", 14.0f);
+        if (m_fontMetadata) {
+            io.Fonts->AddFontFromMemoryTTF((void*)fa_solid_900_ttf, fa_solid_900_ttf_len, 14.0f, &config, icon_ranges);
+        } else {
+            m_fontMetadata = m_fontRegular;
+        }
+        bool fontRes = io.Fonts->Build();
+        std::ostringstream fs;
+        fs << "[INIT] Build Timestamp: " << __DATE__ << " " << __TIME__ << "\n";
+        fs << "[INIT] Font Build Returned: " << (fontRes ? "true" : "false") << "\n";
+        fs << "[INIT] Number of fonts loaded: " << io.Fonts->Fonts.Size << "\n";
+        for (int i = 0; i < io.Fonts->Fonts.Size; i++) {
+            ImFont* f = io.Fonts->Fonts[i];
+            fs << "[INIT] Font " << i << ": " << (f->ConfigData ? f->ConfigData->Name : "Unknown") << ", Size: " << f->FontSize << "\n";
+        }
+        if (!fontRes || io.Fonts->Fonts.Size == 0) {
+            fs << "[ERROR] Font loading failed silently!\n";
+        } else {
+            bool hasFA = false;
+            for (int i = 0; i < io.Fonts->Fonts.Size; i++) {
+                if (io.Fonts->Fonts[i]->ConfigData && strstr(io.Fonts->Fonts[i]->ConfigData->Name, "Font Awesome")) hasFA = true;
+            }
+            if (!hasFA) fs << "[ERROR] FontAwesome merge failed to register as a font layer!\n";
+        }
+        debug_log(fs.str());
         
         applyTheme();
 
@@ -496,7 +587,29 @@ public:
             glClear(GL_COLOR_BUFFER_BIT);
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-            glfwSwapBuffers(m_window);
+            
+
+            static bool screenshot_taken = false;
+            static float accumTime = 0.0f;
+            accumTime += ImGui::GetIO().DeltaTime;
+            if (!screenshot_taken && accumTime > 1.5f) {
+                screenshot_taken = true;
+                int w, h;
+                glfwGetFramebufferSize(m_window, &w, &h);
+                unsigned char* pixels = new unsigned char[3 * w * h];
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+                unsigned char* flipped = new unsigned char[3 * w * h];
+                for(int y = 0; y < h; y++) {
+                    memcpy(flipped + (h - 1 - y) * w * 3, pixels + y * w * 3, w * 3);
+                }
+                stbi_write_png("verification_screenshot.png", w, h, 3, flipped, w * 3);
+                delete[] pixels;
+                delete[] flipped;
+                glfwSwapBuffers(m_window);
+            } else {
+                glfwSwapBuffers(m_window);
+            }
         }
     }
 
@@ -539,6 +652,8 @@ private:
     std::string m_selectedPath;
     bool m_isFolderMode{false};
     int m_listenPort{0};
+    char m_manualIp[64]{""};
+    int m_manualPort{0};
 
     mutable std::mutex m_historyMutex;
     std::vector<peersync::TransferHistoryEntry> m_history;
@@ -588,166 +703,102 @@ private:
         }
     }
 
-    void renderMainViewport() {
-        const ImGuiViewport* viewport = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(viewport->WorkPos);
-        ImGui::SetNextWindowSize(viewport->WorkSize);
-        ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                                        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
-                                        ImGuiWindowFlags_NoBringToFrontOnFocus;
 
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-        ImGui::Begin("MainWindow", nullptr, window_flags);
-        ImGui::PopStyleVar(2);
+    peersync::AppScreen m_currentScreen{peersync::AppScreen::Discovery};
 
-        renderHeader();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        renderPeersTable();
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        renderHistoryPanel();
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        renderStatusBar();
-
-        if (m_showConnectPanel) {
-            ImGui::OpenPopup("Connect & Transfer");
-            renderConnectModal();
-        }
-
-        ImGui::End();
+    void dispatchEvent(peersync::GuiEvent event) {
+        m_currentScreen = peersync::transitionScreen(m_currentScreen, event);
     }
 
-    void renderHistoryPanel() {
-        if (ImGui::CollapsingHeader("Transfer History (Session)", ImGuiTreeNodeFlags_DefaultOpen)) {
-            std::vector<peersync::TransferHistoryEntry> historyCopy;
-            {
-                std::lock_guard<std::mutex> lock(m_historyMutex);
-                historyCopy = m_history;
-            }
-            if (historyCopy.empty()) {
-                ImGui::TextDisabled("No transfers recorded in current session.");
+    ImVec2 calcButtonSize(const char* label, float minWidth = 100.0f) {
+        ImVec2 size = ImGui::CalcTextSize(label);
+        float width = size.x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        float height = size.y + ImGui::GetStyle().FramePadding.y * 2.0f;
+        if (width < minWidth) width = minWidth;
+        return ImVec2(width, height);
+    }
+
+    void renderSidebar() {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.24f, 0.64f, 0.78f, 1.00f));
+        ImGui::SetWindowFontScale(1.2f);
+        if (m_fontTitle) ImGui::PushFont(m_fontTitle);
+        ImGui::TextColored(ImVec4(0.24f, 0.64f, 0.78f, 1.0f), "%s PeerSync", ICON_FA_ARROWS_ROTATE);
+        if (m_fontTitle) ImGui::PopFont();
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::PopStyleColor();
+        ImGui::Separator();
+        ImGui::Spacing();
+        
+        ImGui::BeginChild("SidebarStepper", ImVec2(0, -80), ImGuiChildFlags_None);
+        const char* steps[] = { "1. Discover", "2. Setup", "3. Transfer", "4. Complete" };
+        peersync::AppScreen screens[] = { peersync::AppScreen::Discovery, peersync::AppScreen::Setup, peersync::AppScreen::Transferring, peersync::AppScreen::Complete };
+        for (int i = 0; i < 4; ++i) {
+            if (m_currentScreen == screens[i]) {
+                ImGui::TextColored(ImVec4(0.38f, 0.82f, 0.50f, 1.0f), "%s %s", ICON_FA_ARROW_RIGHT, steps[i]);
             } else {
-                ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY;
-                if (ImGui::BeginTable("HistoryTable", 6, flags, ImVec2(0, 100))) {
-                    ImGui::TableSetupColumn("Peer", ImGuiTableColumnFlags_WidthStretch, 0.2f);
-                    ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch, 0.35f);
-                    ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-                    ImGui::TableSetupColumn("Progress", ImGuiTableColumnFlags_WidthFixed, 65.0f);
-                    ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 85.0f);
-                    ImGui::TableSetupColumn("Time / Action", ImGuiTableColumnFlags_WidthFixed, 110.0f);
-                    ImGui::TableHeadersRow();
-
-                    auto now = std::chrono::system_clock::now();
-                    uint64_t currentSec = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
-
-                    for (int i = static_cast<int>(historyCopy.size()) - 1; i >= 0; --i) {
-                        const auto& entry = historyCopy[i];
-                        ImGui::TableNextRow();
-
-                        ImGui::TableSetColumnIndex(0);
-                        ImGui::TextUnformatted(entry.peerName.c_str());
-
-                        ImGui::TableSetColumnIndex(1);
-                        std::filesystem::path p = std::filesystem::u8path(entry.path);
-                        std::string fname = p.filename().u8string();
-                        if (fname.empty()) fname = entry.path;
-                        ImGui::TextUnformatted(fname.c_str());
-
-                        ImGui::TableSetColumnIndex(2);
-                        ImGui::TextUnformatted(formatBytes(entry.totalBytes).c_str());
-
-                        ImGui::TableSetColumnIndex(3);
-                        int pct = (entry.totalBytes > 0) ? static_cast<int>((entry.bytesTransferred * 100) / entry.totalBytes) : (entry.status == peersync::TransferStatus::Completed ? 100 : 0);
-                        if (pct > 100) pct = 100;
-                        ImGui::Text("%d%%", pct);
-
-                        ImGui::TableSetColumnIndex(4);
-                        std::string statusLbl = peersync::formatTransferStatusLabel(entry.status);
-                        if (entry.status == peersync::TransferStatus::Completed || entry.status == peersync::TransferStatus::Resumed) {
-                            ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "%s", statusLbl.c_str());
-                        } else if (entry.status == peersync::TransferStatus::Interrupted) {
-                            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "%s", statusLbl.c_str());
-                        } else if (entry.status == peersync::TransferStatus::Failed) {
-                            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", statusLbl.c_str());
-                        } else {
-                            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", statusLbl.c_str());
-                        }
-
-                        ImGui::TableSetColumnIndex(5);
-                        uint64_t elapsed = (currentSec >= entry.timestampSec) ? (currentSec - entry.timestampSec) : 0;
-                        ImGui::TextUnformatted(peersync::formatElapsedTime(elapsed).c_str());
-
-                        if (entry.status == peersync::TransferStatus::Interrupted || entry.status == peersync::TransferStatus::Failed) {
-                            ImGui::SameLine();
-                            ImGui::PushID(i);
-                            if (ImGui::SmallButton("Resume")) {
-                                peersync::DiscoveredPeer peer;
-                                peer.instanceName = entry.peerName;
-                                peer.ipAddress = entry.peerIp;
-                                peer.port = entry.peerPort;
-                                m_selectedPeer = peer;
-                                m_selectedPath = entry.path;
-                                m_isFolderMode = entry.isFolder;
-                                m_initiatorMode = true;
-                                m_generatedPin = peersync::generatePin();
-                                m_enteredPin[0] = '\0';
-                                m_showConnectPanel = true;
-                                m_worker.reset();
-                            }
-                            ImGui::PopID();
-                        }
-                    }
-                    ImGui::EndTable();
-                }
+                if (m_fontMetadata) ImGui::PushFont(m_fontMetadata);
+        ImGui::TextDisabled("  %s", steps[i]);
+        if (m_fontMetadata) ImGui::PopFont();
             }
+            ImGui::Spacing();
         }
+        ImGui::EndChild();
+        
+        ImGui::Separator();
+        std::string statusCopy;
+        size_t peerCount = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_peersMutex);
+            statusCopy = m_statusText;
+            peerCount = m_cachedPeers.size();
+        }
+        if (m_fontMetadata) ImGui::PushFont(m_fontMetadata);
+        ImGui::TextDisabled("Peers Found: %zu", peerCount);
+        if (m_fontMetadata) ImGui::PopFont();
+        ImGui::TextWrapped("%s", statusCopy.c_str());
     }
 
-    void renderHeader() {
-        ImGui::TextColored(ImVec4(0.24f, 0.64f, 0.78f, 1.00f), "peersync");
-        ImGui::SameLine();
-        ImGui::TextDisabled("| Local Network File Synchronization & Discovery");
-
-        float rightButtonsWidth = 320.0f;
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - rightButtonsWidth);
-
-        if (ImGui::Button("Receive / Accept", ImVec2(150, 0))) {
-            m_showConnectPanel = true;
+    void renderDiscoveryScreen() {
+        if (m_fontTitle) ImGui::PushFont(m_fontTitle);
+        ImGui::TextColored(ImVec4(0.24f, 0.64f, 0.78f, 1.0f), "Discovery & Recent");
+        if (m_fontTitle) ImGui::PopFont();
+        ImGui::Spacing();
+        ImGui::Text("Find a peer to send files to, or wait to receive files.");
+        ImGui::Spacing();
+        if (ImGui::Button(ICON_FA_DOWNLOAD " Receive Files", calcButtonSize(ICON_FA_DOWNLOAD " Receive Files", 150.0f))) {
             m_initiatorMode = false;
+            m_listenPort = 0;
             m_enteredPin[0] = '\0';
             m_selectedPath.clear();
             m_isFolderMode = false;
             m_worker.reset();
+            dispatchEvent(peersync::GuiEvent::StartSetupResponder);
         }
         ImGui::SameLine();
-        if (ImGui::Button("Manual Connect", ImVec2(150, 0))) {
-            m_showConnectPanel = true;
+        if (ImGui::Button(ICON_FA_PAPER_PLANE " Manual Send (IP)", calcButtonSize(ICON_FA_PAPER_PLANE " Manual Send (IP)", 150.0f))) {
             m_initiatorMode = true;
             m_selectedPeer = peersync::DiscoveredPeer();
             m_generatedPin = peersync::generatePin();
             m_enteredPin[0] = '\0';
             m_selectedPath.clear();
             m_isFolderMode = false;
+            m_manualIp[0] = '\0';
+            m_manualPort = 0;
             m_worker.reset();
+            dispatchEvent(peersync::GuiEvent::StartSetupInitiator);
         }
         ImGui::SameLine();
-        if (ImGui::Button("Rescan Network", ImVec2(150, 0))) {
+        if (ImGui::Button(ICON_FA_ARROWS_ROTATE " Rescan Network", calcButtonSize(ICON_FA_ARROWS_ROTATE " Rescan Network", 150.0f))) {
             startDiscovery();
         }
-    }
 
-    void renderPeersTable() {
-        float footerHeight = 160.0f;
-        ImVec2 tableSize = ImVec2(0, ImGui::GetContentRegionAvail().y - footerHeight);
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float tableHeight = ImGui::GetContentRegionAvail().y * 0.5f;
+        ImGui::BeginChild("PeersTableChild", ImVec2(0, tableHeight), ImGuiChildFlags_Border);
         
-        ImGui::BeginChild("TableContainer", tableSize, true);
-
         std::vector<peersync::DiscoveredPeer> peersCopy;
         {
             std::lock_guard<std::mutex> lock(m_peersMutex);
@@ -757,49 +808,94 @@ private:
         if (peersCopy.empty()) {
             ImGui::Spacing();
             ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.38f, 0.82f, 0.50f, 1.0f), "%s Searching for peers on your local network...", ICON_FA_SPINNER);
             ImGui::Spacing();
-            ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - 280.0f) * 0.5f);
-            ImGui::TextDisabled("No peers discovered yet on the local network.");
-            ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - 380.0f) * 0.5f);
-            ImGui::TextDisabled("Start another instance with 'peersync listen' or click Rescan.");
+            if (m_fontMetadata) ImGui::PushFont(m_fontMetadata);
+        ImGui::TextDisabled("Ensure the other device is open and connected to the same LAN.");
+        if (m_fontMetadata) ImGui::PopFont();
         } else {
             ImGuiTableFlags tableFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
-                                         ImGuiTableFlags_BordersOuter | ImGuiTableFlags_ScrollY |
-                                         ImGuiTableFlags_Resizable | ImGuiTableFlags_Reorderable |
-                                         ImGuiTableFlags_PadOuterX;
-
+                                         ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
             if (ImGui::BeginTable("DiscoveredPeersTable", 4, tableFlags)) {
                 ImGui::TableSetupColumn("Peer Name", ImGuiTableColumnFlags_WidthStretch, 0.35f);
                 ImGui::TableSetupColumn("IP Address", ImGuiTableColumnFlags_WidthStretch, 0.25f);
                 ImGui::TableSetupColumn("Port", ImGuiTableColumnFlags_WidthFixed, 80.0f);
-                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 100.0f);
                 ImGui::TableHeadersRow();
 
                 for (size_t i = 0; i < peersCopy.size(); ++i) {
                     const auto& peer = peersCopy[i];
                     ImGui::TableNextRow();
-
                     ImGui::TableSetColumnIndex(0);
                     ImGui::TextUnformatted(peer.instanceName.c_str());
-
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", peer.instanceName.c_str());
+                    
                     ImGui::TableSetColumnIndex(1);
                     ImGui::TextUnformatted(peer.ipAddress.c_str());
-
+                    
                     ImGui::TableSetColumnIndex(2);
                     ImGui::Text("%u", static_cast<unsigned>(peer.port));
-
+                    
                     ImGui::TableSetColumnIndex(3);
-                    std::string btnLabel = "Connect##" + std::to_string(i);
+                    std::string btnLabel = "Send##" + std::to_string(i);
                     if (ImGui::Button(btnLabel.c_str(), ImVec2(-FLT_MIN, 0))) {
                         m_selectedPeer = peer;
-                        m_showConnectPanel = true;
                         m_initiatorMode = true;
                         m_generatedPin = peersync::generatePin();
                         m_enteredPin[0] = '\0';
                         m_selectedPath.clear();
                         m_isFolderMode = false;
                         m_worker.reset();
+                        dispatchEvent(peersync::GuiEvent::StartSetupInitiator);
                     }
+                }
+                ImGui::EndTable();
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Transfer History");
+        ImGui::BeginChild("HistoryTableChild", ImVec2(0, 0), ImGuiChildFlags_Border);
+        std::vector<peersync::TransferHistoryEntry> historyCopy;
+        {
+            std::lock_guard<std::mutex> lock(m_historyMutex);
+            historyCopy = m_history;
+        }
+        if (historyCopy.empty()) {
+            if (m_fontMetadata) ImGui::PushFont(m_fontMetadata);
+        ImGui::TextDisabled("No transfers recorded in current session.");
+        if (m_fontMetadata) ImGui::PopFont();
+        } else {
+            ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY;
+            if (ImGui::BeginTable("HistoryTable", 5, flags)) {
+                ImGui::TableSetupColumn("Peer");
+                ImGui::TableSetupColumn("Path");
+                ImGui::TableSetupColumn("Size");
+                ImGui::TableSetupColumn("Progress");
+                ImGui::TableSetupColumn("Status");
+                ImGui::TableHeadersRow();
+
+                for (int i = static_cast<int>(historyCopy.size()) - 1; i >= 0; --i) {
+                    const auto& entry = historyCopy[i];
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(entry.peerName.c_str());
+                    
+                    ImGui::TableSetColumnIndex(1);
+                    std::filesystem::path p = std::filesystem::u8path(entry.path);
+                    ImGui::TextUnformatted(p.filename().u8string().c_str());
+                    
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TextUnformatted(formatBytes(entry.totalBytes).c_str());
+                    
+                    ImGui::TableSetColumnIndex(3);
+                    int pct = (entry.totalBytes > 0) ? static_cast<int>((entry.bytesTransferred * 100) / entry.totalBytes) : 0;
+                    if (entry.status == peersync::TransferStatus::Completed) pct = 100;
+                    ImGui::Text("%d%%", pct);
+                    
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TextUnformatted(peersync::formatTransferStatusLabel(entry.status).c_str());
                 }
                 ImGui::EndTable();
             }
@@ -807,317 +903,265 @@ private:
         ImGui::EndChild();
     }
 
-    void renderConnectModal() {
-        ImGui::SetNextWindowSize(ImVec2(650, 520), ImGuiCond_Appearing);
-        ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
-        if (ImGui::BeginPopupModal("Connect & Transfer", &m_showConnectPanel, flags)) {
-            TransferWorker::Stats stats = m_worker.getStats();
+    void renderSetupScreen() {
+        if (m_fontTitle) ImGui::PushFont(m_fontTitle);
+        ImGui::TextColored(ImVec4(0.24f, 0.64f, 0.78f, 1.0f), "%s", m_initiatorMode ? "Setup: Send to Peer" : "Setup: Receive from Peer");
+        if (m_fontTitle) ImGui::PopFont();
+        ImGui::Separator();
+        ImGui::Spacing();
 
-            if (stats.state == TransferWorker::State::Idle) {
-                if (ImGui::RadioButton("Initiator (Connect & Send/Sync)", m_initiatorMode)) {
-                    m_initiatorMode = true;
-                    if (m_generatedPin.empty()) m_generatedPin = peersync::generatePin();
-                }
-                ImGui::SameLine();
-                if (ImGui::RadioButton("Responder (Listen & Receive)", !m_initiatorMode)) {
-                    m_initiatorMode = false;
-                }
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                if (m_initiatorMode) {
-                    if (m_selectedPeer.instanceName.empty()) {
-                        static char ipBuf[128] = "127.0.0.1";
-                        static int portBuf = 5566;
-                        ImGui::InputText("Target IP", ipBuf, sizeof(ipBuf));
-                        ImGui::InputInt("Target Port", &portBuf);
-                        m_selectedPeer.ipAddress = ipBuf;
-                        m_selectedPeer.port = portBuf;
-                    } else {
-                        ImGui::Text("Target Peer: %s", m_selectedPeer.instanceName.c_str());
-                        ImGui::TextDisabled("Address: %s : %u", m_selectedPeer.ipAddress.c_str(), (unsigned)m_selectedPeer.port);
-                    }
-                    ImGui::Spacing();
-
-                    ImGui::Text("Secure Pairing PIN:");
-                    ImGui::SetWindowFontScale(1.4f);
-                    ImGui::TextColored(ImVec4(0.24f, 0.88f, 0.78f, 1.00f), "%s", m_generatedPin.c_str());
-                    ImGui::SetWindowFontScale(1.0f);
-                    ImGui::TextDisabled("Tell the person on the receiving device to enter this 6-digit PIN.");
-                    ImGui::Spacing();
-
-                    ImGui::Text("Select Data to Transfer:");
-                    if (ImGui::Button("Browse File...", ImVec2(140, 32))) {
-                        const char* res = tinyfd_openFileDialog("Select File to Send", "", 0, nullptr, nullptr, 0);
-                        if (res) {
-                            m_selectedPath = res;
-                            m_isFolderMode = false;
-                        }
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Browse Folder...", ImVec2(140, 32))) {
-                        const char* res = tinyfd_selectFolderDialog("Select Folder to Sync", "");
-                        if (res) {
-                            m_selectedPath = res;
-                            m_isFolderMode = true;
-                        }
-                    }
-                    ImGui::TextWrapped("Selected Path: %s", m_selectedPath.empty() ? "(None selected)" : m_selectedPath.c_str());
-                    ImGui::Spacing();
-
-                    uint64_t jApplied = 0, jExpected = 0;
-                    bool diskFound = !m_selectedPath.empty() && peersync::detectJournalForPath(m_selectedPath, m_isFolderMode, jApplied, jExpected);
-                    const peersync::TransferHistoryEntry* hist = nullptr;
-                    if (!m_selectedPath.empty()) {
-                        std::lock_guard<std::mutex> lock(m_historyMutex);
-                        std::string pName = m_selectedPeer.instanceName.empty() ? m_selectedPeer.ipAddress : m_selectedPeer.instanceName;
-                        hist = peersync::findRelevantResumableSession(m_history, pName, m_selectedPath);
-                    }
-                    bool canResume = diskFound || (hist != nullptr);
-                    uint64_t resBytes = diskFound ? jApplied : (hist ? hist->bytesTransferred : 0);
-                    uint64_t totBytes = diskFound ? jExpected : (hist ? hist->totalBytes : 0);
-
-                    if (canResume) {
-                        int pct = (totBytes > 0) ? static_cast<int>((resBytes * 100) / totBytes) : 0;
-                        if (pct > 100) pct = 100;
-                        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.22f, 0.28f, 1.0f));
-                        ImGui::BeginChild("ResumeNoticeInit", ImVec2(0, 55), true);
-                        ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), "[ Incomplete Prior Transfer Detected ]");
-                        if (totBytes > 0) {
-                            ImGui::Text("Progress: %s of %s (%d%% complete)", formatBytes(resBytes).c_str(), formatBytes(totBytes).c_str(), pct);
-                        } else {
-                            ImGui::Text("Previous interrupted sync session found for this target.");
-                        }
-                        ImGui::EndChild();
-                        ImGui::PopStyleColor();
-                    }
-
-                    ImGui::Separator();
-                    ImGui::Spacing();
-
-                    bool canStart = !m_selectedPath.empty() && !m_selectedPeer.ipAddress.empty() && m_selectedPeer.port != 0;
-                    if (!canStart) ImGui::BeginDisabled();
-                    if (canResume) {
-                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.65f, 0.5f, 1.0f));
-                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.75f, 0.6f, 1.0f));
-                        if (ImGui::Button("Resume Transfer (Fast)", ImVec2(200, 36))) {
-                            startTransferWithHistory(true, true);
-                        }
-                        ImGui::PopStyleColor(2);
-                        ImGui::SameLine();
-                        if (ImGui::Button("Start Fresh (--no-resume)", ImVec2(200, 36))) {
-                            startTransferWithHistory(true, false);
-                        }
-                    } else {
-                        if (ImGui::Button("Start Connection & Transfer", ImVec2(240, 36))) {
-                            startTransferWithHistory(true, true);
-                        }
-                    }
-                    if (!canStart) ImGui::EndDisabled();
-                } else {
-                    ImGui::Text("Responder Mode: Waiting for Peer Connection");
-                    ImGui::InputInt("Listen Port (0 for auto)", &m_listenPort);
-                    if (m_listenPort < 0) m_listenPort = 0;
-                    if (m_listenPort > 65535) m_listenPort = 65535;
-                    ImGui::Spacing();
-
-                    ImGui::Text("Enter Pairing PIN from Initiator:");
-                    ImGui::InputText("##PinInput", m_enteredPin, sizeof(m_enteredPin), ImGuiInputTextFlags_CharsDecimal);
-                    ImGui::TextDisabled("Enter the 6-digit PIN displayed on the connecting device.");
-                    ImGui::Spacing();
-
-                    ImGui::Text("Select Destination / Accept Folder:");
-                    if (ImGui::Button("Browse Accept Folder...", ImVec2(180, 32))) {
-                        const char* res = tinyfd_selectFolderDialog("Select Destination Folder", "");
-                        if (res) {
-                            m_selectedPath = res;
-                        }
-                    }
-                    ImGui::SameLine();
-                    ImGui::Checkbox("Expect Folder Sync", &m_isFolderMode);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Check this if the Sender is sending a complete Folder.\nLeave unchecked if the Sender is sending a Single File.");
-                    }
-                    ImGui::TextWrapped("Destination Path: %s", m_selectedPath.empty() ? "(None selected)" : m_selectedPath.c_str());
-                    ImGui::Spacing();
-
-                    uint64_t jApplied = 0, jExpected = 0;
-                    bool diskFound = !m_selectedPath.empty() && peersync::detectJournalForPath(m_selectedPath, m_isFolderMode, jApplied, jExpected);
-                    const peersync::TransferHistoryEntry* hist = nullptr;
-                    if (!m_selectedPath.empty()) {
-                        std::lock_guard<std::mutex> lock(m_historyMutex);
-                        std::string pName = m_selectedPeer.instanceName.empty() ? m_selectedPeer.ipAddress : m_selectedPeer.instanceName;
-                        hist = peersync::findRelevantResumableSession(m_history, pName, m_selectedPath);
-                    }
-                    bool canResume = diskFound || (hist != nullptr);
-                    uint64_t resBytes = diskFound ? jApplied : (hist ? hist->bytesTransferred : 0);
-                    uint64_t totBytes = diskFound ? jExpected : (hist ? hist->totalBytes : 0);
-
-                    if (canResume) {
-                        int pct = (totBytes > 0) ? static_cast<int>((resBytes * 100) / totBytes) : 0;
-                        if (pct > 100) pct = 100;
-                        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.22f, 0.28f, 1.0f));
-                        ImGui::BeginChild("ResumeNoticeResp", ImVec2(0, 55), true);
-                        ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), "[ Incomplete Prior Transfer Detected ]");
-                        if (totBytes > 0) {
-                            ImGui::Text("Progress: %s of %s (%d%% complete)", formatBytes(resBytes).c_str(), formatBytes(totBytes).c_str(), pct);
-                        } else {
-                            ImGui::Text("Previous interrupted sync session found for this target.");
-                        }
-                        ImGui::EndChild();
-                        ImGui::PopStyleColor();
-                    }
-
-                    ImGui::Separator();
-                    ImGui::Spacing();
-
-                    bool canStart = !m_selectedPath.empty() && strlen(m_enteredPin) > 0;
-                    if (!canStart) ImGui::BeginDisabled();
-                    if (canResume) {
-                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.65f, 0.5f, 1.0f));
-                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.75f, 0.6f, 1.0f));
-                        if (ImGui::Button("Resume Receive (Fast)", ImVec2(200, 36))) {
-                            startTransferWithHistory(false, true);
-                        }
-                        ImGui::PopStyleColor(2);
-                        ImGui::SameLine();
-                        if (ImGui::Button("Receive Fresh (--no-resume)", ImVec2(200, 36))) {
-                            startTransferWithHistory(false, false);
-                        }
-                    } else {
-                        if (ImGui::Button("Start Listening & Pairing", ImVec2(240, 36))) {
-                            startTransferWithHistory(false, true);
-                        }
-                    }
-                    if (!canStart) ImGui::EndDisabled();
-                }
-
-                ImGui::SameLine();
-                if (ImGui::Button("Cancel", ImVec2(120, 36))) {
-                    ImGui::CloseCurrentPopup();
-                    m_showConnectPanel = false;
-                }
+        ImGui::BeginChild("PairingGroup", ImVec2(0, 0), ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY);
+        if (m_initiatorMode) {
+            if (m_selectedPeer.ipAddress.empty()) {
+                ImGui::Text("Target Peer: (Manual Entry)");
+                ImGui::InputText("IP Address", m_manualIp, sizeof(m_manualIp));
+                ImGui::InputInt("Port (optional)", &m_manualPort);
             } else {
-                updateActiveHistoryFromStats(stats);
-
-                std::string stateTitle = "Status: Working...";
-                if (stats.state == TransferWorker::State::Connecting) stateTitle = "Status: Connecting...";
-                else if (stats.state == TransferWorker::State::Pairing) stateTitle = "Status: Secure Pairing...";
-                else if (stats.state == TransferWorker::State::Transferring) stateTitle = "Status: Transferring / Synchronizing...";
-                else if (stats.state == TransferWorker::State::Completed) stateTitle = "Status: Transfer Completed!";
-                else if (stats.state == TransferWorker::State::Failed) stateTitle = "Status: Transfer Failed";
-
-                if (stats.state == TransferWorker::State::Completed) {
-                    ImGui::TextColored(ImVec4(0.24f, 0.88f, 0.78f, 1.00f), "%s", stateTitle.c_str());
-                } else if (stats.state == TransferWorker::State::Failed) {
-                    ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.00f), "%s", stateTitle.c_str());
-                } else {
-                    ImGui::TextColored(ImVec4(0.24f, 0.64f, 0.78f, 1.00f), "%s", stateTitle.c_str());
-                }
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                ImGui::TextWrapped("%s", stats.statusMessage.c_str());
-                ImGui::Spacing();
-
-                if (stats.inPreTransfer) {
-                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.2f, 1.0f), "Processing: %s", stats.preTransferPhase.c_str());
-                    float p = stats.preTransferTotal > 0 ? static_cast<float>(stats.preTransferProcessed) / static_cast<float>(stats.preTransferTotal) : 0.0f;
-                    ImGui::ProgressBar(p, ImVec2(-1.0f, 24.0f));
-                } else if (stats.state == TransferWorker::State::Transferring) {
-                    float progress = 0.0f;
-                    if (stats.totalBytes > 0) {
-                        progress = static_cast<float>(stats.bytesTransferred) / static_cast<float>(stats.totalBytes);
-                    } else if (stats.totalFiles > 0) {
-                        progress = static_cast<float>(stats.filesTransferred) / static_cast<float>(stats.totalFiles);
-                    }
-                    if (progress > 1.0f) progress = 1.0f;
-
-                    ImGui::ProgressBar(progress, ImVec2(-1, 24));
-                    ImGui::Spacing();
-
-                    ImGui::Text("Transferred: %s of %s", formatBytes(stats.bytesTransferred).c_str(), formatBytes(stats.totalBytes).c_str());
-                    if (!stats.currentFileName.empty()) {
-                        ImGui::Text("Current File: [File %u/%u] %s", (unsigned)stats.filesTransferred, (unsigned)stats.totalFiles, stats.currentFileName.c_str());
-                    }
-                    double savedPct = (stats.totalBytes > 0) ? (100.0 * static_cast<double>(stats.deltaSavingsBytes) / static_cast<double>(stats.totalBytes)) : 0.0;
-                    ImGui::TextColored(ImVec4(0.38f, 0.82f, 0.50f, 1.00f), "Delta Savings: %s (%.1f%% saved over network)", formatBytes(stats.deltaSavingsBytes).c_str(), savedPct);
-                } else if (stats.state == TransferWorker::State::Completed) {
-                    ImGui::BeginChild("SummaryBox", ImVec2(0, 140), true);
-                    ImGui::TextColored(ImVec4(0.24f, 0.88f, 0.78f, 1.00f), "Final Transfer Summary:");
-                    ImGui::Separator();
-                    ImGui::Text("Total Bytes Transferred: %s", formatBytes(stats.bytesTransferred).c_str());
-                    ImGui::Text("Total Source Size:       %s", formatBytes(stats.totalBytes).c_str());
-                    double savedPct = (stats.totalBytes > 0) ? (100.0 * static_cast<double>(stats.deltaSavingsBytes) / static_cast<double>(stats.totalBytes)) : 0.0;
-                    ImGui::TextColored(ImVec4(0.38f, 0.82f, 0.50f, 1.00f), "Bandwidth Saved:         %s (%.1f%%)", formatBytes(stats.deltaSavingsBytes).c_str(), savedPct);
-                    ImGui::Text("Total Files Synced:      %u", (unsigned)stats.totalFiles);
-                    ImGui::EndChild();
-                } else if (stats.state == TransferWorker::State::Failed) {
-                    ImGui::BeginChild("ErrorBox", ImVec2(0, 100), true);
-                    ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.00f), "Error Details:");
-                    ImGui::Separator();
-                    ImGui::TextWrapped("%s", stats.errorMessage.c_str());
-                    ImGui::EndChild();
-                }
-
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                if (stats.state == TransferWorker::State::Completed || stats.state == TransferWorker::State::Failed) {
-                    if (ImGui::Button("Close / Return to Peer List", ImVec2(240, 36))) {
-                        updateActiveHistoryFromStats(stats);
-                        m_activeHistoryIndex = SIZE_MAX;
-                        m_worker.reset();
-                        ImGui::CloseCurrentPopup();
-                        m_showConnectPanel = false;
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Start Another Transfer", ImVec2(200, 36))) {
-                        updateActiveHistoryFromStats(stats);
-                        m_activeHistoryIndex = SIZE_MAX;
-                        m_worker.reset();
-                    }
-                } else {
-                    if (ImGui::Button("Cancel Operation", ImVec2(180, 36))) {
-                        {
-                            std::lock_guard<std::mutex> lock(m_historyMutex);
-                            if (m_activeHistoryIndex != SIZE_MAX && m_activeHistoryIndex < m_history.size()) {
-                                m_history[m_activeHistoryIndex].status = peersync::TransferStatus::Interrupted;
-                            }
-                        }
-                        m_activeHistoryIndex = SIZE_MAX;
-                        m_worker.stop();
-                    }
-                }
+                ImGui::Text("Target Peer: %s", m_selectedPeer.instanceName.empty() ? m_selectedPeer.ipAddress.c_str() : m_selectedPeer.instanceName.c_str());
             }
-
-            ImGui::EndPopup();
+            ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.2f, 1.0f), "Pairing PIN: %s", m_generatedPin.c_str());
+            if (m_fontMetadata) ImGui::PushFont(m_fontMetadata);
+        ImGui::TextDisabled("Enter this PIN on the receiving device when prompted.");
+        if (m_fontMetadata) ImGui::PopFont();
         } else {
-            m_showConnectPanel = false;
+            ImGui::Text("Responder Mode: Waiting for Peer Connection");
+            ImGui::InputInt("Listen Port (0 for auto)", &m_listenPort);
+            ImGui::Text("Enter Pairing PIN from Initiator:");
+            ImGui::InputText("##PinInput", m_enteredPin, sizeof(m_enteredPin), ImGuiInputTextFlags_CharsDecimal);
+        }
+        ImGui::EndChild();
+
+        ImGui::Spacing();
+
+        ImGui::BeginChild("FileGroup", ImVec2(0, 0), ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY);
+        ImGui::Text("%s", m_initiatorMode ? "Select File/Folder to Send:" : "Select Destination Folder:");
+        if (m_initiatorMode) {
+            if (ImGui::Button(ICON_FA_FILE " Browse File...", calcButtonSize(ICON_FA_FILE " Browse File...", 140.0f))) {
+                const char* res = tinyfd_openFileDialog("Select File to Send", "", 0, nullptr, nullptr, 0);
+                if (res) { m_selectedPath = res; m_isFolderMode = false; }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(ICON_FA_FOLDER_OPEN " Browse Folder...", calcButtonSize(ICON_FA_FOLDER_OPEN " Browse Folder...", 140.0f))) {
+                const char* res = tinyfd_selectFolderDialog("Select Folder to Send", "");
+                if (res) { m_selectedPath = res; m_isFolderMode = true; }
+            }
+        } else {
+            if (ImGui::Button(ICON_FA_FOLDER_OPEN " Browse Accept Folder...", calcButtonSize(ICON_FA_FOLDER_OPEN " Browse Accept Folder...", 180.0f))) {
+                const char* res = tinyfd_selectFolderDialog("Select Destination Folder", "");
+                if (res) { m_selectedPath = res; }
+            }
+            ImGui::SameLine();
+            ImGui::Checkbox("Expect Folder Sync", &m_isFolderMode);
+        }
+        if (m_fontMetadata) ImGui::PushFont(m_fontMetadata);
+        ImGui::TextWrapped("Path: %s", m_selectedPath.empty() ? "(None selected)" : m_selectedPath.c_str());
+        if (m_fontMetadata) ImGui::PopFont();
+        ImGui::EndChild();
+
+        ImGui::Spacing();
+
+        float bottomBtnHeight = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+        float previewHeight = ImGui::GetContentRegionAvail().y - bottomBtnHeight;
+        if (previewHeight < 100.0f) previewHeight = 100.0f;
+
+        ImGui::BeginChild("PreviewGroup", ImVec2(0, previewHeight), ImGuiChildFlags_Border);
+        
+        float availY = ImGui::GetContentRegionAvail().y;
+        float expectedY = ImGui::GetTextLineHeightWithSpacing() * 4.0f;
+        if (availY > expectedY) {
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (availY - expectedY) / 2.0f);
+        }
+
+        if (m_fontTitle) ImGui::PushFont(m_fontTitle);
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "TRANSFER PREVIEW");
+        if (m_fontTitle) ImGui::PopFont();
+        ImGui::Separator();
+        
+        if (m_initiatorMode) {
+            std::string target = m_selectedPeer.ipAddress.empty() ? (m_manualIp[0] == '\0' ? "Unknown" : std::string(m_manualIp) + ":" + std::to_string(m_manualPort)) : m_selectedPeer.ipAddress;
+            ImGui::Text("Destination: %s", target.c_str());
+            ImGui::Text("Payload:     %s", m_selectedPath.empty() ? "(No file selected)" : std::filesystem::u8path(m_selectedPath).filename().u8string().c_str());
+            ImGui::Text("Type:        %s", m_isFolderMode ? "Directory Sync" : "Single File");
+        } else {
+            ImGui::Text("Listening on Port: %s", m_listenPort == 0 ? "Auto" : std::to_string(m_listenPort).c_str());
+            ImGui::Text("Expected PIN:      %s", m_enteredPin[0] == '\0' ? "(None entered)" : m_enteredPin);
+            ImGui::Text("Save Location:     %s", m_selectedPath.empty() ? "(No folder selected)" : std::filesystem::u8path(m_selectedPath).filename().u8string().c_str());
+        }
+
+        ImGui::EndChild();
+        
+        ImGui::Spacing();
+        bool canStart = false;
+        if (m_initiatorMode) {
+            bool hasTarget = !m_selectedPeer.ipAddress.empty() || m_manualIp[0] != '\0';
+            canStart = !m_selectedPath.empty() && hasTarget;
+        } else {
+            canStart = !m_selectedPath.empty() && m_enteredPin[0] != '\0';
+        }
+
+        if (ImGui::Button(ICON_FA_XMARK " Cancel Setup", calcButtonSize(ICON_FA_XMARK " Cancel Setup", 120.0f))) {
+            dispatchEvent(peersync::GuiEvent::CancelSetup);
+        }
+
+        std::string btnLabel;
+        if (m_initiatorMode) {
+            btnLabel = m_isFolderMode ? (ICON_FA_UPLOAD " Send Folder to Peer") : (ICON_FA_UPLOAD " Send File to Peer");
+        } else {
+            btnLabel = ICON_FA_DOWNLOAD " Listen & Accept";
+        }
+
+        ImVec2 startBtnSize = calcButtonSize(btnLabel.c_str(), 200.0f);
+        float offsetPos = ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - startBtnSize.x;
+        if (offsetPos > ImGui::GetCursorPosX()) ImGui::SameLine(offsetPos);
+        else ImGui::Spacing();
+
+        if (!canStart) ImGui::BeginDisabled();
+        if (ImGui::Button(btnLabel.c_str(), startBtnSize)) {
+            if (m_initiatorMode && m_selectedPeer.ipAddress.empty()) {
+                m_selectedPeer.ipAddress = m_manualIp;
+                m_selectedPeer.port = static_cast<uint16_t>(m_manualPort);
+            }
+            startTransferWithHistory(m_initiatorMode, true);
+            dispatchEvent(peersync::GuiEvent::StartTransfer);
+        }
+        if (!canStart) ImGui::EndDisabled();
+    }
+
+    void renderTransferringScreen() {
+        TransferWorker::Stats stats = m_worker.getStats();
+        updateActiveHistoryFromStats(stats);
+        
+        if (m_fontTitle) ImGui::PushFont(m_fontTitle);
+        ImGui::TextColored(ImVec4(0.24f, 0.64f, 0.78f, 1.0f), "Transfer in Progress...");
+        if (m_fontTitle) ImGui::PopFont();
+        ImGui::Separator();
+        ImGui::Spacing();
+        
+        float bottomBtnHeight = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+        float contentHeight = ImGui::GetContentRegionAvail().y - bottomBtnHeight;
+        if (contentHeight < 100.0f) contentHeight = 100.0f;
+
+        ImGui::BeginChild("TransferContent", ImVec2(0, contentHeight), ImGuiChildFlags_Border);
+        
+        float availY = ImGui::GetContentRegionAvail().y;
+        float expectedContentY = ImGui::GetTextLineHeightWithSpacing() * 6.0f;
+        if (availY > expectedContentY) {
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (availY - expectedContentY) / 2.0f);
+        }
+
+        ImGui::Text("Status: %s", stats.statusMessage.c_str());
+        if (stats.state == TransferWorker::State::Failed) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error: %s", stats.errorMessage.c_str());
+        }
+        
+        ImGui::Spacing();
+
+        if (stats.inPreTransfer) {
+            float preProgress = stats.preTransferTotal > 0 ? (float)stats.preTransferProcessed / stats.preTransferTotal : 0.0f;
+            ImGui::Text("Phase: %s", stats.preTransferPhase.c_str());
+            ImGui::ProgressBar(preProgress, ImVec2(-1.0f, ImGui::GetTextLineHeight() + ImGui::GetStyle().FramePadding.y * 2.0f));
+            if (stats.preTransferTotal > 0) {
+                ImGui::Text("%zu / %zu items processed", (size_t)stats.preTransferProcessed, (size_t)stats.preTransferTotal);
+            }
+        } else {
+            float progress = 0.0f;
+            if (stats.totalBytes > 0) progress = static_cast<float>(stats.bytesTransferred) / stats.totalBytes;
+            
+            ImGui::ProgressBar(progress, ImVec2(-1.0f, ImGui::GetTextLineHeight() + ImGui::GetStyle().FramePadding.y * 2.0f));
+            ImGui::Text("%s of %s", formatBytes(stats.bytesTransferred).c_str(), formatBytes(stats.totalBytes).c_str());
+            if (!stats.currentFileName.empty()) {
+                ImGui::Text("Current File: %s", stats.currentFileName.c_str());
+            }
+        }
+        ImGui::EndChild();
+        
+        ImGui::Spacing();
+        if (stats.state == TransferWorker::State::Completed || stats.state == TransferWorker::State::Failed) {
+            if (ImGui::Button("Continue", calcButtonSize("Continue", 120.0f))) {
+                if (stats.state == TransferWorker::State::Completed) dispatchEvent(peersync::GuiEvent::TransferFinished);
+                else dispatchEvent(peersync::GuiEvent::ReturnToHome);
+            }
+        } else {
+            if (ImGui::Button(ICON_FA_XMARK " Cancel Transfer", calcButtonSize(ICON_FA_XMARK " Cancel Transfer", 150.0f))) {
+                m_worker.cancelAsync();
+                dispatchEvent(peersync::GuiEvent::CancelTransfer);
+            }
         }
     }
 
-    void renderStatusBar() {
-        std::string statusCopy;
-        size_t peerCount = 0;
-        {
-            std::lock_guard<std::mutex> lock(m_peersMutex);
-            statusCopy = m_statusText;
-            peerCount = m_cachedPeers.size();
+    void renderCancellingScreen() {
+        if (m_fontTitle) ImGui::PushFont(m_fontTitle);
+        ImGui::TextColored(ImVec4(0.24f, 0.64f, 0.78f, 1.0f), "Cancelling Transfer...");
+        if (m_fontTitle) ImGui::PopFont();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::BeginChild("CancelContent", ImVec2(0, 0), ImGuiChildFlags_Border);
+        float availY = ImGui::GetContentRegionAvail().y;
+        float textY = ImGui::GetTextLineHeight();
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (availY - textY) / 2.0f);
+        
+        const char* cancelText = "Cleaning up network sockets and stopping transfer thread...";
+        float textX = (ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize(cancelText).x) / 2.0f;
+        if (textX > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + textX);
+        ImGui::Text("%s", cancelText);
+        ImGui::EndChild();
+
+        if (m_worker.isFinished()) {
+            dispatchEvent(peersync::GuiEvent::ReturnToHome);
         }
-
-        ImGui::TextDisabled("Status:");
-        ImGui::SameLine();
-        ImGui::TextUnformatted(statusCopy.c_str());
-
-        std::string countStr = "Discovered Peers: " + std::to_string(peerCount);
-        float countWidth = ImGui::CalcTextSize(countStr.c_str()).x;
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - countWidth - 8.0f);
-        ImGui::TextColored(ImVec4(0.24f, 0.64f, 0.78f, 1.00f), "%s", countStr.c_str());
     }
 
+    void renderCompleteScreen() {
+        TransferWorker::Stats stats = m_worker.getStats();
+        if (m_fontTitle) ImGui::PushFont(m_fontTitle);
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "%s Transfer Complete!", ICON_FA_CIRCLE_CHECK);
+        if (m_fontTitle) ImGui::PopFont();
+        ImGui::Separator();
+        ImGui::Spacing();
+        
+        ImGui::BeginChild("SummaryBox", ImVec2(0, 0), ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY);
+        ImGui::Text("Successfully transferred %s", formatBytes(stats.totalBytes).c_str());
+        ImGui::Text("Total Files: %zu", stats.totalFiles);
+        ImGui::EndChild();
+        
+        ImGui::Spacing();
+        if (ImGui::Button(ICON_FA_HOUSE " Return to Home", calcButtonSize(ICON_FA_HOUSE " Return to Home", 150.0f))) {
+            dispatchEvent(peersync::GuiEvent::ReturnToHome);
+        }
+    }
+
+    void renderMainViewport() {
+        ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->WorkPos);
+        ImGui::SetNextWindowSize(viewport->WorkSize);
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings;
+        
+        if (ImGui::Begin("PeerSync", nullptr, flags)) {
+            ImGui::BeginChild("Sidebar", ImVec2(220, 0), ImGuiChildFlags_Border);
+            renderSidebar();
+            ImGui::EndChild();
+            
+            ImGui::SameLine();
+            
+            ImGui::BeginChild("Content", ImVec2(0, 0), ImGuiChildFlags_None);
+            if (m_currentScreen == peersync::AppScreen::Discovery) {
+                renderDiscoveryScreen();
+            } else if (m_currentScreen == peersync::AppScreen::Setup) {
+                renderSetupScreen();
+            } else if (m_currentScreen == peersync::AppScreen::Transferring) {
+                renderTransferringScreen();
+            } else if (m_currentScreen == peersync::AppScreen::Cancelling) {
+                renderCancellingScreen();
+            } else if (m_currentScreen == peersync::AppScreen::Complete) {
+                renderCompleteScreen();
+            }
+            ImGui::EndChild();
+        }
+        ImGui::End();
+    }
     void applyTheme() {
+        debug_log("[INIT] applyTheme() is being called!");
         ImGuiStyle& style = ImGui::GetStyle();
         
         style.WindowPadding = ImVec2(16.0f, 16.0f);
