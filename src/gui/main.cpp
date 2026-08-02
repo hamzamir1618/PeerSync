@@ -1187,8 +1187,8 @@ private:
         ImVec4* colors = style.Colors;
         colors[ImGuiCol_Text]                   = ImVec4(0.95f, 0.96f, 0.98f, 1.00f);
         colors[ImGuiCol_TextDisabled]           = ImVec4(0.50f, 0.55f, 0.60f, 1.00f);
-        colors[ImGuiCol_WindowBg]               = ImVec4(0.12f, 0.13f, 0.15f, 1.00f);
-        colors[ImGuiCol_ChildBg]                = ImVec4(0.15f, 0.16f, 0.19f, 1.00f);
+        colors[ImGuiCol_WindowBg]               = ImVec4(0.08f, 0.09f, 0.11f, 1.00f);
+        colors[ImGuiCol_ChildBg]                = ImVec4(0.18f, 0.20f, 0.24f, 1.00f);
         colors[ImGuiCol_PopupBg]                = ImVec4(0.15f, 0.16f, 0.19f, 0.98f);
         colors[ImGuiCol_Border]                 = ImVec4(0.24f, 0.26f, 0.30f, 1.00f);
         colors[ImGuiCol_BorderShadow]           = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
