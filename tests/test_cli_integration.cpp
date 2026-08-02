@@ -141,6 +141,19 @@ struct Subprocess {
         return m_capturedOutput;
     }
 
+    void drainOutput() {
+        if (!hChildStdOutRead) return;
+        DWORD bytesAvail = 0;
+        while (PeekNamedPipe(hChildStdOutRead, nullptr, 0, nullptr, &bytesAvail, nullptr) && bytesAvail > 0) {
+            char buf[4096];
+            DWORD toRead = (std::min)(bytesAvail, static_cast<DWORD>(sizeof(buf)));
+            DWORD bytesRead = 0;
+            if (ReadFile(hChildStdOutRead, buf, toRead, &bytesRead, nullptr) && bytesRead > 0) {
+                m_capturedOutput.append(buf, bytesRead);
+            }
+        }
+    }
+
     void interrupt() {
         if (valid && pi.hProcess) {
             TerminateProcess(pi.hProcess, 0);
@@ -675,8 +688,8 @@ TEST(CliIntegrationTest, ResumptionAfterInterruption) {
     std::filesystem::path dstDir = tempDir / "dst";
     std::filesystem::create_directories(dstDir, ec);
 
-    // Create a 50 MB file with pseudorandom content
-    const size_t fileSize = 50 * 1024 * 1024;
+    // Create an 800 MB file with pseudorandom content
+    const size_t fileSize = 800 * 1024 * 1024;
     {
         std::ofstream ofs(srcFile, std::ios::binary | std::ios::trunc);
         std::vector<char> buffer(65536);
@@ -714,10 +727,13 @@ TEST(CliIntegrationTest, ResumptionAfterInterruption) {
     recvProc1.sendInput(pin1 + "\n");
     recvProc1.closeInput();
 
-    // Wait until temporary file and journal exist and progress is between 256 KB and 48 MB
+    // Wait until temporary file and journal exist and progress is between 100 MB and 750 MB
     bool interrupted = false;
     auto startWait = std::chrono::steady_clock::now();
     while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startWait).count() < 30000) {
+        sendProc1.drainOutput();
+        recvProc1.drainOutput();
+
         std::filesystem::path jPath = dstDir / "large_file.dat.peersync-journal";
         std::filesystem::path tPath = dstDir / "large_file.dat.peersync-tmp";
         if (std::filesystem::exists(jPath, ec) && std::filesystem::exists(tPath, ec)) {
@@ -729,8 +745,7 @@ TEST(CliIntegrationTest, ResumptionAfterInterruption) {
                     try { bytesApplied = std::stoull(line.substr(14)); } catch (...) {}
                 }
             }
-            auto sz = std::filesystem::file_size(tPath, ec);
-            if (!ec && bytesApplied >= 256 * 1024 && bytesApplied < 48 * 1024 * 1024 && sz >= bytesApplied) {
+            if (bytesApplied >= 100 * 1024 * 1024 && bytesApplied < 750 * 1024 * 1024) {
                 sendProc1.interrupt();
                 recvProc1.interrupt();
                 sendProc1.terminate();
