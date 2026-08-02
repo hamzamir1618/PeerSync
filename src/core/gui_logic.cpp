@@ -140,4 +140,53 @@ bool detectJournalForPath(
     return false;
 }
 
+AppScreen transitionScreen(AppScreen current, GuiEvent event) {
+    switch (current) {
+        case AppScreen::Discovery:
+            if (event == GuiEvent::StartSetupInitiator || 
+                event == GuiEvent::StartSetupResponder || 
+                event == GuiEvent::ResumeFromHistory) {
+                return AppScreen::Setup;
+            }
+            break;
+        case AppScreen::Setup:
+            if (event == GuiEvent::CancelSetup) {
+                return AppScreen::Discovery;
+            } else if (event == GuiEvent::StartTransfer) {
+                return AppScreen::Transferring;
+            }
+            break;
+        case AppScreen::Transferring:
+            if (event == GuiEvent::CancelTransfer) {
+                return AppScreen::Cancelling;
+            } else if (event == GuiEvent::TransferFinished) {
+                return AppScreen::Complete;
+            } else if (event == GuiEvent::ReturnToHome) {
+                return AppScreen::Discovery;
+            }
+            break;
+        case AppScreen::Cancelling:
+            if (event == GuiEvent::ReturnToHome) {
+                return AppScreen::Discovery;
+            }
+            break;
+        case AppScreen::Complete:
+            if (event == GuiEvent::ReturnToHome) {
+                return AppScreen::Discovery;
+            }
+            break;
+    }
+    return current;
+}
+
+SetupConfig getSetupFromHistory(const TransferHistoryEntry& entry) {
+    SetupConfig config;
+    config.isInitiator = !entry.peerIp.empty();
+    config.targetIp = entry.peerIp;
+    config.targetPort = entry.peerPort;
+    config.path = entry.path;
+    config.isFolder = entry.isFolder;
+    return config;
+}
+
 } // namespace peersync

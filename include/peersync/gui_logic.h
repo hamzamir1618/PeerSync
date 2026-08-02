@@ -44,6 +44,37 @@ bool detectJournalForPath(
     uint64_t& outExpectedSize
 );
 
+enum class AppScreen {
+    Discovery,
+    Setup,
+    Transferring,
+    Cancelling,
+    Complete
+};
+
+enum class GuiEvent {
+    StartSetupInitiator,
+    StartSetupResponder,
+    ResumeFromHistory,
+    CancelSetup,
+    StartTransfer,
+    CancelTransfer,
+    TransferFinished,
+    ReturnToHome
+};
+
+AppScreen transitionScreen(AppScreen current, GuiEvent event);
+
+struct SetupConfig {
+    bool isInitiator{true};
+    std::string targetIp;
+    uint16_t targetPort{0};
+    std::string path;
+    bool isFolder{false};
+};
+
+SetupConfig getSetupFromHistory(const TransferHistoryEntry& entry);
+
 } // namespace peersync
 
 #endif // PEERSYNC_GUI_LOGIC_H

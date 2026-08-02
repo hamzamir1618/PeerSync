@@ -275,82 +275,85 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
         }
     });
 
-    auto sendCurrentBatch = [&]() {
-        if (m_config.isCancelled && m_config.isCancelled()) {
-            ackThreadRunning = false;
-            m_socket.close();
-            ackThread.join();
-            throw PeerSyncProtocolException("Transfer cancelled by user");
-        }
-        
-        std::unique_lock<std::mutex> lock(ackMutex);
-        ackCv.wait(lock, [&]() { return inFlight < MAX_IN_FLIGHT || ackThreadError; });
-        if (ackThreadError) {
-            ackThreadRunning = false;
-            m_socket.close();
-            ackThread.join();
-            throw PeerSyncProtocolException("Ack thread error: " + ackThreadErrorMsg);
-        }
-        
-        DeltaInstructionsMessage deltaMsg{relativePath, fileSize, static_cast<uint32_t>(m_config.blockSize), totalBatchesSent++, currentBatch};
-        sendMsg(serializeMessage(deltaMsg));
-        inFlight++;
-        
-        currentBatch.clear();
-        currentBatchBytes = 0;
-
-        if (m_config.progressCallback) {
-            m_config.progressCallback(m_bytesSent, std::min(fileBytesProcessed, fileSize), fileSize);
-        }
-    };
-
-    for (const auto& inst : deltaInstructions) {
-        if (m_config.isCancelled && m_config.isCancelled()) {
-            throw PeerSyncProtocolException("Transfer cancelled by user");
-        }
-        uint64_t instLen = (inst.type == DeltaInstructionType::Literal) ? inst.bytes.size() : m_config.blockSize;
-        if (instIndex < resumeOffset) {
-            if (inst.type == DeltaInstructionType::Literal && inst.bytes.size() > m_config.literalThreshold) {
-                blockDataSeq++;
+    try {
+        auto sendCurrentBatch = [&]() {
+            if (m_config.isCancelled && m_config.isCancelled()) {
+                throw PeerSyncProtocolException("Transfer cancelled by user");
             }
-            instIndex++;
-            fileBytesProcessed += instLen;
-            continue;
-        }
-        instIndex++;
-        fileBytesProcessed += instLen;
-        currentBatchBytes += instLen;
+            
+            std::unique_lock<std::mutex> lock(ackMutex);
+            ackCv.wait(lock, [&]() { return inFlight < MAX_IN_FLIGHT || ackThreadError; });
+            if (ackThreadError) {
+                throw PeerSyncProtocolException("Ack thread error: " + ackThreadErrorMsg);
+            }
+            
+            DeltaInstructionsMessage deltaMsg{relativePath, fileSize, static_cast<uint32_t>(m_config.blockSize), totalBatchesSent++, currentBatch};
+            sendMsg(serializeMessage(deltaMsg));
+            inFlight++;
+            
+            currentBatch.clear();
+            currentBatchBytes = 0;
 
-        if (inst.type == DeltaInstructionType::Literal && inst.bytes.size() > m_config.literalThreshold) {
-            // Send BlockData message first
-            BlockDataMessage blockMsg{relativePath, blockDataSeq, inst.bytes};
-            sendMsg(serializeMessage(blockMsg));
             if (m_config.progressCallback) {
                 m_config.progressCallback(m_bytesSent, std::min(fileBytesProcessed, fileSize), fileSize);
             }
+        };
 
-            // Reference this block in the instruction batch with empty bytes and blockIndex = blockDataSeq
-            DeltaInstruction refInst;
-            refInst.type = DeltaInstructionType::Literal;
-            refInst.blockIndex = blockDataSeq++;
-            refInst.bytes = {};
-            currentBatch.push_back(std::move(refInst));
-        } else {
-            currentBatch.push_back(inst);
+        for (const auto& inst : deltaInstructions) {
+            if (m_config.isCancelled && m_config.isCancelled()) {
+                throw PeerSyncProtocolException("Transfer cancelled by user");
+            }
+            uint64_t instLen = (inst.type == DeltaInstructionType::Literal) ? inst.bytes.size() : m_config.blockSize;
+            if (instIndex < resumeOffset) {
+                if (inst.type == DeltaInstructionType::Literal && inst.bytes.size() > m_config.literalThreshold) {
+                    blockDataSeq++;
+                }
+                instIndex++;
+                fileBytesProcessed += instLen;
+                continue;
+            }
+            instIndex++;
+            fileBytesProcessed += instLen;
+            currentBatchBytes += instLen;
+
+            if (inst.type == DeltaInstructionType::Literal && inst.bytes.size() > m_config.literalThreshold) {
+                // Send BlockData message first
+                BlockDataMessage blockMsg{relativePath, blockDataSeq, inst.bytes};
+                sendMsg(serializeMessage(blockMsg));
+                if (m_config.progressCallback) {
+                    m_config.progressCallback(m_bytesSent, std::min(fileBytesProcessed, fileSize), fileSize);
+                }
+
+                // Reference this block in the instruction batch with empty bytes and blockIndex = blockDataSeq
+                DeltaInstruction refInst;
+                refInst.type = DeltaInstructionType::Literal;
+                refInst.blockIndex = blockDataSeq++;
+                refInst.bytes = {};
+                currentBatch.push_back(std::move(refInst));
+            } else {
+                currentBatch.push_back(inst);
+            }
+
+            if (currentBatch.size() >= m_config.maxInstructionsPerMessage || currentBatchBytes >= 512 * 1024) {
+                sendCurrentBatch();
+            }
         }
 
-        if (currentBatch.size() >= m_config.maxInstructionsPerMessage || currentBatchBytes >= 512 * 1024) {
+        if (!currentBatch.empty() || (deltaInstructions.empty() && !isResuming)) {
             sendCurrentBatch();
         }
-    }
 
-    if (!currentBatch.empty() || (deltaInstructions.empty() && !isResuming)) {
-        sendCurrentBatch();
-    }
-
-    {
-        std::unique_lock<std::mutex> lock(ackMutex);
-        ackCv.wait(lock, [&]() { return inFlight == 0 || ackThreadError; });
+        {
+            std::unique_lock<std::mutex> lock(ackMutex);
+            ackCv.wait(lock, [&]() { return inFlight == 0 || ackThreadError; });
+        }
+    } catch (...) {
+        ackThreadRunning = false;
+        m_socket.close();
+        if (ackThread.joinable()) {
+            ackThread.join();
+        }
+        throw;
     }
 
     // Wait for the ack thread to naturally exit after receiving TransferComplete or ErrorMessage

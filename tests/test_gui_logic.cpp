@@ -138,4 +138,57 @@ TEST_F(GuiLogicDiskTest, DetectJournalDirectory) {
     EXPECT_EQ(es, 2000);
 }
 
+TEST(GuiLogicTest, TransitionScreen) {
+    using peersync::AppScreen;
+    using peersync::GuiEvent;
+    
+    // Discovery transitions
+    EXPECT_EQ(peersync::transitionScreen(AppScreen::Discovery, GuiEvent::StartSetupInitiator), AppScreen::Setup);
+    EXPECT_EQ(peersync::transitionScreen(AppScreen::Discovery, GuiEvent::StartSetupResponder), AppScreen::Setup);
+    EXPECT_EQ(peersync::transitionScreen(AppScreen::Discovery, GuiEvent::ResumeFromHistory), AppScreen::Setup);
+    // Invalid event from Discovery should do nothing
+    EXPECT_EQ(peersync::transitionScreen(AppScreen::Discovery, GuiEvent::CancelSetup), AppScreen::Discovery);
+    
+    // Setup transitions
+    EXPECT_EQ(peersync::transitionScreen(AppScreen::Setup, GuiEvent::CancelSetup), AppScreen::Discovery);
+    EXPECT_EQ(peersync::transitionScreen(AppScreen::Setup, GuiEvent::StartTransfer), AppScreen::Transferring);
+    
+    // Transferring transitions
+    EXPECT_EQ(peersync::transitionScreen(AppScreen::Transferring, GuiEvent::CancelTransfer), AppScreen::Discovery);
+    EXPECT_EQ(peersync::transitionScreen(AppScreen::Transferring, GuiEvent::TransferFinished), AppScreen::Complete);
+    
+    // Complete transitions
+    EXPECT_EQ(peersync::transitionScreen(AppScreen::Complete, GuiEvent::ReturnToHome), AppScreen::Discovery);
+}
+
+TEST(GuiLogicTest, GetSetupFromHistory) {
+    // Initiator history entry (has peerIp)
+    peersync::TransferHistoryEntry initEntry;
+    initEntry.peerIp = "192.168.1.100";
+    initEntry.peerPort = 5566;
+    initEntry.path = "/path/to/send";
+    initEntry.isFolder = true;
+    
+    auto initSetup = peersync::getSetupFromHistory(initEntry);
+    EXPECT_TRUE(initSetup.isInitiator);
+    EXPECT_EQ(initSetup.targetIp, "192.168.1.100");
+    EXPECT_EQ(initSetup.targetPort, 5566);
+    EXPECT_EQ(initSetup.path, "/path/to/send");
+    EXPECT_TRUE(initSetup.isFolder);
+    
+    // Responder history entry (empty peerIp)
+    peersync::TransferHistoryEntry respEntry;
+    respEntry.peerIp = "";
+    respEntry.peerPort = 5566;
+    respEntry.path = "/path/to/receive";
+    respEntry.isFolder = false;
+    
+    auto respSetup = peersync::getSetupFromHistory(respEntry);
+    EXPECT_FALSE(respSetup.isInitiator);
+    EXPECT_EQ(respSetup.targetIp, "");
+    EXPECT_EQ(respSetup.targetPort, 5566);
+    EXPECT_EQ(respSetup.path, "/path/to/receive");
+    EXPECT_FALSE(respSetup.isFolder);
+}
+
 } // anonymous namespace

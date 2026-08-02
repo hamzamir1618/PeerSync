@@ -16,6 +16,16 @@ This directory contains single-header and drop-in libraries that are directly ve
 - **Pinned Version**: `v2.9.3`
 - **Purpose**: Cross-platform C/C++ library for native file open, save, and folder selection dialogs. Used by the GUI frontend for file and directory selection without requiring heavy GUI frameworks.
 
+## Font Awesome 6 Free Solid (`fa-solid-900.ttf` / `IconsFontAwesome6.h`)
+
+- **Source URL**: [https://fontawesome.com/](https://fontawesome.com/) and [https://github.com/juliettef/IconFontCppHeaders](https://github.com/juliettef/IconFontCppHeaders)
+- **License**: 
+  - Icons (Glyphs): CC BY 4.0 License (Attribution required)
+  - Fonts: SIL OFL 1.1 License
+  - `IconsFontAwesome6.h`: zlib License
+- **Pinned Version**: 6.5.2 (Free)
+- **Purpose**: Provides highly scalable vector icons for the GUI frontend. The TTF is compressed into a C-array (`fa_solid_900_compressed.h`) and embedded at compile-time to guarantee rendering consistency across deployments.
+
 ## Cryptographic Algorithms (SHA-256 / HMAC / PBKDF2)
 
 - **Status**: Implemented directly in `src/core/pairing.cpp` (no third-party dependency vendored).

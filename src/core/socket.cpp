@@ -87,8 +87,10 @@ namespace {
 static void closeSocketHandle(os_socket_t sock) noexcept {
     if (sock != OS_INVALID_SOCKET) {
 #ifdef _WIN32
+        shutdown(sock, SD_BOTH);
         closesocket(sock);
 #else
+        shutdown(sock, SHUT_RDWR);
         ::close(sock);
 #endif
     }
