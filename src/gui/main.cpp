@@ -80,6 +80,7 @@ public:
         std::string currentFileName;
         bool isResuming{false};
         uint16_t boundPort{0};
+        double timeTakenSeconds{0.0};
     };
 
     TransferWorker() = default;
@@ -112,6 +113,7 @@ public:
         m_stats = Stats{};
         m_cancelRequested.store(false);
         m_isFinished.store(true);
+        m_startTime = std::chrono::steady_clock::now();
     }
 
     Stats getStats() const {
@@ -137,11 +139,16 @@ private:
     std::atomic<bool> m_isFinished{true};
     std::mutex m_socketMutex;
     peersync::TcpSocket* m_activeSocket{nullptr};
+    std::chrono::steady_clock::time_point m_startTime;
 
     void updateState(State state, const std::string& msg) {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_stats.state = state;
         m_stats.statusMessage = msg;
+        if (state == State::Completed || state == State::Failed) {
+            auto now = std::chrono::steady_clock::now();
+            m_stats.timeTakenSeconds = std::chrono::duration<double>(now - m_startTime).count();
+        }
     }
 
     void updateError(const std::string& err) {
@@ -149,6 +156,8 @@ private:
         m_stats.state = State::Failed;
         m_stats.errorMessage = err;
         m_stats.statusMessage = "Error: " + err;
+        auto now = std::chrono::steady_clock::now();
+        m_stats.timeTakenSeconds = std::chrono::duration<double>(now - m_startTime).count();
     }
 
     void updateProgress(uint64_t bytes, uint64_t total, const std::string& file, size_t idx, size_t count) {
@@ -1093,7 +1102,27 @@ private:
         
         ImGui::Spacing();
 
-        if (stats.inPreTransfer) {
+        if (stats.state == TransferWorker::State::Completed) {
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.4f, 1.0f), ICON_FA_CIRCLE_CHECK " Transfer Summary");
+            ImGui::Spacing();
+            
+            if (stats.totalFiles > 1) {
+                ImGui::Text("Total Files:       %zu", stats.totalFiles);
+            }
+            ImGui::Text("Total Size:        %s", formatBytes(stats.totalBytes).c_str());
+            ImGui::Text("Bytes Transferred: %s", formatBytes(stats.bytesTransferred).c_str());
+            
+            if (stats.deltaSavingsBytes > 0) {
+                ImGui::TextColored(ImVec4(0.24f, 0.64f, 0.78f, 1.0f), "Data Saved:        %s (Delta Sync)", formatBytes(stats.deltaSavingsBytes).c_str());
+            }
+            if (stats.timeTakenSeconds > 0.0) {
+                ImGui::Text("Time Taken:        %.1f s", stats.timeTakenSeconds);
+                double speed = static_cast<double>(stats.bytesTransferred) / stats.timeTakenSeconds;
+                ImGui::Text("Average Speed:     %s/s", formatBytes(static_cast<uint64_t>(speed)).c_str());
+            }
+        } else if (stats.inPreTransfer) {
             float preProgress = stats.preTransferTotal > 0 ? (float)stats.preTransferProcessed / stats.preTransferTotal : 0.0f;
             ImGui::Text("Phase: %s", stats.preTransferPhase.c_str());
             ImGui::ProgressBar(preProgress, ImVec2(-1.0f, ImGui::GetTextLineHeight() + ImGui::GetStyle().FramePadding.y * 2.0f));
