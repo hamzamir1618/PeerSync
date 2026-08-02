@@ -34,6 +34,10 @@ public:
     uint16_t getBoundPort() const;
     void setRecvTimeout(int timeoutMs);
     void setSendTimeout(int timeoutMs);
+    void setNoDelay(bool enable);
+    bool getNoDelay() const;
+    void getBufferSize(int& sndbuf, int& rcvbuf) const;
+    void setBufferSize(int size);
     void close() noexcept;
     bool isValid() const noexcept { return m_handle != invalid_handle; }
 

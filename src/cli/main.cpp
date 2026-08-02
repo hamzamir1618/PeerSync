@@ -139,7 +139,7 @@ static std::string formatBytes(uint64_t bytes) {
     return oss.str();
 }
 
-int runSend(const std::string& filePath, const std::string& target, uint16_t port, bool allowResume = true) {
+int runSend(const std::string& filePath, const std::string& target, uint16_t port, const std::string& providedPin, bool allowResume = true) {
     setupSignalHandlers();
     std::error_code ec;
     std::filesystem::path localFile(filePath);
@@ -213,8 +213,11 @@ int runSend(const std::string& filePath, const std::string& target, uint16_t por
         return 1;
     }
 
-    std::string pin = peersync::generatePin();
-    std::cout << "Enter this PIN on the receiving device: " << pin << "\n" << std::flush;
+    std::string pin = providedPin;
+    if (pin.empty()) {
+        pin = peersync::generatePin();
+        std::cout << "Enter this PIN on the receiving device: " << pin << "\n" << std::flush;
+    }
 
     peersync::PairingSession pairing(peersync::PairingRole::Initiator, pin);
     pairing.start();
@@ -288,7 +291,7 @@ int runSend(const std::string& filePath, const std::string& target, uint16_t por
     return 0;
 }
 
-int runReceive(uint16_t port, const std::string& acceptDir, bool allowResume = true) {
+int runReceive(uint16_t port, const std::string& acceptDir, const std::string& providedPin, bool allowResume = true) {
     setupSignalHandlers();
     std::error_code ec;
     std::filesystem::path dir(acceptDir);
@@ -340,13 +343,15 @@ int runReceive(uint16_t port, const std::string& acceptDir, bool allowResume = t
         return 1;
     }
 
-    std::cout << "Enter PIN: " << std::flush;
-    std::string pin;
-    if (!(std::cin >> pin)) {
-        std::cerr << "\nError reading PIN from input.\n";
-        client.close();
-        server.close();
-        return 1;
+    std::string pin = providedPin;
+    if (pin.empty()) {
+        std::cout << "Enter PIN: " << std::flush;
+        if (!(std::cin >> pin)) {
+            std::cerr << "\nError reading PIN from input.\n";
+            client.close();
+            server.close();
+            return 1;
+        }
     }
     pin.erase(std::remove_if(pin.begin(), pin.end(), [](unsigned char c){ return std::isspace(c); }), pin.end());
 
@@ -784,19 +789,29 @@ int main(int argc, char* argv[]) {
 
     auto* sendCmd = app.add_subcommand("send", "Send a file to a local network peer");
     std::string sendFile = "";
-    std::string sendTo = "";
+    std::string sendTarget = "";
     uint16_t sendPort = 0;
+    std::string sendPin = "";
+    bool sendResume = true;
     sendCmd->add_option("file", sendFile, "Path to the file to send")->required();
-    sendCmd->add_option("--to", sendTo, "Peer name or IP address (or IP:port)")->required();
+    sendCmd->add_option("--to", sendTarget, "Peer name or IP address (or IP:port)")->required();
     sendCmd->add_option("--port", sendPort, "TCP port of destination peer");
-    sendCmd->add_flag("--resume,!--no-resume", allowResume, "Enable/disable automatic resumption of interrupted transfers (default: true)");
+    sendCmd->add_option("--pin", sendPin, "PIN to use for pairing (bypasses prompt)");
+    sendCmd->add_flag("--resume,!--no-resume", sendResume, "Enable/disable automatic resumption of interrupted transfers")->default_val(true);
+
+
 
     auto* receiveCmd = app.add_subcommand("receive", "Listen for and receive a file from a peer");
     uint16_t receivePort = 0;
     std::string receiveDir = ".";
+    std::string receivePin = "";
+    bool receiveResume = true;
     receiveCmd->add_option("--port", receivePort, "TCP port to listen on (defaults to 0 for ephemeral)");
-    receiveCmd->add_option("--accept-dir", receiveDir, "Directory to save received file")->default_val(".");
-    receiveCmd->add_flag("--resume,!--no-resume", allowResume, "Enable/disable automatic resumption of interrupted transfers (default: true)");
+    receiveCmd->add_option("--accept-dir", receiveDir, "Directory to save received file");
+    receiveCmd->add_option("--pin", receivePin, "PIN to use for pairing (bypasses prompt)");
+    receiveCmd->add_flag("--resume,!--no-resume", receiveResume, "Enable/disable automatic resumption of interrupted transfers")->default_val(true);
+
+
 
     auto* syncCmd = app.add_subcommand("sync", "Synchronize a directory with a local network peer");
     std::string syncDir = "";
@@ -821,9 +836,9 @@ int main(int argc, char* argv[]) {
     } else if (app.got_subcommand(discoverCmd)) {
         return runDiscover(discoverTimeout);
     } else if (app.got_subcommand(sendCmd)) {
-        return runSend(sendFile, sendTo, sendPort, allowResume);
+        return runSend(sendFile, sendTarget, sendPort, sendPin, sendResume);
     } else if (app.got_subcommand(receiveCmd)) {
-        return runReceive(receivePort, receiveDir, allowResume);
+        return runReceive(receivePort, receiveDir, receivePin, receiveResume);
     } else if (app.got_subcommand(syncCmd)) {
         return runSync(syncDir, syncTo, syncPort, allowResume);
     } else if (app.got_subcommand(receiveDirCmd)) {

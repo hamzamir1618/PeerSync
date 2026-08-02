@@ -18,6 +18,11 @@
 #include <GLFW/glfw3.h>
 
 #include <peersync/discovery.h>
+#include <fstream>
+static void debug_log(const std::string& msg) {
+    std::ofstream ofs("peersync_debug.log", std::ios::app);
+    ofs << msg << "\n";
+}
 #include <peersync/socket.h>
 #include <peersync/message_framing.h>
 #include <peersync/pairing.h>
@@ -59,6 +64,12 @@ public:
         uint64_t bytesTransferred{0};
         uint64_t totalBytes{0};
         uint64_t deltaSavingsBytes{0};
+
+        bool inPreTransfer{false};
+        std::string preTransferPhase;
+        uint64_t preTransferProcessed{0};
+        uint64_t preTransferTotal{0};
+
         size_t filesTransferred{0};
         size_t totalFiles{0};
         std::string currentFileName;
@@ -233,23 +244,38 @@ private:
     }
 
     void executeTransfer(peersync::TcpSocket& socket, peersync::SyncOrchestrator::Role role, bool isDir, const std::string& path, bool isSending, bool allowResume) {
+        debug_log("executeTransfer start: " + path);
         if (!allowResume) {
             std::error_code ec;
             if (!isDir) {
-                std::filesystem::remove(path + ".peersync-journal", ec);
-                std::filesystem::remove(path + ".peersync-tmp", ec);
+                try {
+                    std::filesystem::path p = std::filesystem::u8path(path);
+                    std::filesystem::path j = p; j += ".peersync-journal";
+                    std::filesystem::path t = p; t += ".peersync-tmp";
+                    std::filesystem::remove(j, ec);
+                    std::filesystem::remove(t, ec);
+                } catch(const std::exception& e) {
+                    debug_log(std::string("executeTransfer single file cleanup threw: ") + e.what());
+                    throw;
+                }
             } else {
-                std::filesystem::path p(path);
-                if (std::filesystem::exists(p, ec) && std::filesystem::is_directory(p, ec)) {
-                    for (const auto& entry : std::filesystem::recursive_directory_iterator(p, ec)) {
-                        if (ec) break;
-                        std::string pStr = entry.path().string();
-                        if (pStr.length() >= 17 && pStr.compare(pStr.length() - 17, 17, ".peersync-journal") == 0) {
-                            std::filesystem::remove(entry.path(), ec);
-                            std::string tStr = pStr.substr(0, pStr.length() - 17) + ".peersync-tmp";
-                            std::filesystem::remove(tStr, ec);
+                try {
+                    std::filesystem::path p = std::filesystem::u8path(path);
+                    if (std::filesystem::exists(p, ec) && std::filesystem::is_directory(p, ec)) {
+                        for (const auto& entry : std::filesystem::recursive_directory_iterator(p, ec)) {
+                            if (ec) break;
+                            std::string pStr = entry.path().u8string();
+                            if (pStr.length() >= 17 && pStr.compare(pStr.length() - 17, 17, ".peersync-journal") == 0) {
+                                std::filesystem::remove(entry.path(), ec);
+                                std::filesystem::path tPath = std::filesystem::u8path(pStr.substr(0, pStr.length() - 17));
+                                tPath += ".peersync-tmp";
+                                std::filesystem::remove(tPath, ec);
+                            }
                         }
                     }
+                } catch(const std::exception& e) {
+                    debug_log(std::string("executeTransfer folder cleanup threw: ") + e.what());
+                    throw;
                 }
             }
         }
@@ -266,18 +292,29 @@ private:
                 }
             };
             config.progressCallback = [this](uint64_t bytesSent, uint64_t fileProcessed, uint64_t totSize) {
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_stats.inPreTransfer = false;
+                }
                 updateProgress(bytesSent, totSize, "", 1, 1);
+            };
+            config.preTransferProgressCallback = [this](const std::string& phase, uint64_t processed, uint64_t total) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_stats.inPreTransfer = true;
+                m_stats.preTransferPhase = phase;
+                m_stats.preTransferProcessed = processed;
+                m_stats.preTransferTotal = total;
             };
 
             peersync::TransferSession session(socket, config);
-            std::filesystem::path fsPath(path);
+            std::filesystem::path fsPath = std::filesystem::u8path(path);
             bool success = false;
             if (isSending) {
                 uint64_t fSize = 0;
                 std::error_code ec;
                 if (std::filesystem::exists(fsPath, ec)) fSize = std::filesystem::file_size(fsPath, ec);
-                updateProgress(0, fSize, fsPath.filename().string(), 1, 1);
-                success = session.sendFile(fsPath, fsPath.filename().string());
+                updateProgress(0, fSize, fsPath.filename().u8string(), 1, 1);
+                success = session.sendFile(fsPath, fsPath.filename().u8string());
             } else {
                 updateProgress(0, 0, "receiving file...", 1, 1);
                 success = session.receiveFile(fsPath);
@@ -320,10 +357,18 @@ private:
 
             policy.transferConfig.progressCallback = [this, &totalTransferred, &totalSize](uint64_t sent, uint64_t processed, uint64_t totFile) {
                 std::lock_guard<std::mutex> lock(m_mutex);
+                m_stats.inPreTransfer = false;
                 m_stats.bytesTransferred = totalTransferred.load() + sent;
                 if (m_stats.totalBytes > m_stats.bytesTransferred) {
                     m_stats.deltaSavingsBytes = m_stats.totalBytes - m_stats.bytesTransferred;
                 }
+            };
+            policy.transferConfig.preTransferProgressCallback = [this](const std::string& phase, uint64_t processed, uint64_t total) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_stats.inPreTransfer = true;
+                m_stats.preTransferPhase = phase;
+                m_stats.preTransferProcessed = processed;
+                m_stats.preTransferTotal = total;
             };
 
             policy.onFileComplete = [this, &totalTransferred, &totalSize](const std::string& relPath, size_t idx, size_t total, uint64_t transferred, uint64_t fSize, bool sending) {
@@ -339,7 +384,7 @@ private:
             };
 
             peersync::SyncOrchestrator orchestrator(socket, role, policy);
-            bool success = orchestrator.syncDirectory(std::filesystem::path(path));
+            bool success = orchestrator.syncDirectory(std::filesystem::u8path(path));
             socket.close();
             if (!success) {
                 throw std::runtime_error("Directory synchronization failed.");
@@ -606,8 +651,8 @@ private:
                         ImGui::TextUnformatted(entry.peerName.c_str());
 
                         ImGui::TableSetColumnIndex(1);
-                        std::filesystem::path p(entry.path);
-                        std::string fname = p.filename().string();
+                        std::filesystem::path p = std::filesystem::u8path(entry.path);
+                        std::string fname = p.filename().u8string();
                         if (fname.empty()) fname = entry.path;
                         ImGui::TextUnformatted(fname.c_str());
 
@@ -672,6 +717,17 @@ private:
         if (ImGui::Button("Receive / Accept", ImVec2(150, 0))) {
             m_showConnectPanel = true;
             m_initiatorMode = false;
+            m_enteredPin[0] = '\0';
+            m_selectedPath.clear();
+            m_isFolderMode = false;
+            m_worker.reset();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Manual Connect", ImVec2(150, 0))) {
+            m_showConnectPanel = true;
+            m_initiatorMode = true;
+            m_selectedPeer = peersync::DiscoveredPeer();
+            m_generatedPin = peersync::generatePin();
             m_enteredPin[0] = '\0';
             m_selectedPath.clear();
             m_isFolderMode = false;
@@ -749,7 +805,7 @@ private:
     }
 
     void renderConnectModal() {
-        ImGui::SetNextWindowSize(ImVec2(560, 440), ImGuiCond_Appearing);
+        ImGui::SetNextWindowSize(ImVec2(650, 520), ImGuiCond_Appearing);
         ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
         if (ImGui::BeginPopupModal("Connect & Transfer", &m_showConnectPanel, flags)) {
             TransferWorker::Stats stats = m_worker.getStats();
@@ -767,8 +823,17 @@ private:
                 ImGui::Spacing();
 
                 if (m_initiatorMode) {
-                    ImGui::Text("Target Peer: %s", m_selectedPeer.instanceName.c_str());
-                    ImGui::TextDisabled("Address: %s : %u", m_selectedPeer.ipAddress.c_str(), (unsigned)m_selectedPeer.port);
+                    if (m_selectedPeer.instanceName.empty()) {
+                        static char ipBuf[128] = "127.0.0.1";
+                        static int portBuf = 5566;
+                        ImGui::InputText("Target IP", ipBuf, sizeof(ipBuf));
+                        ImGui::InputInt("Target Port", &portBuf);
+                        m_selectedPeer.ipAddress = ipBuf;
+                        m_selectedPeer.port = portBuf;
+                    } else {
+                        ImGui::Text("Target Peer: %s", m_selectedPeer.instanceName.c_str());
+                        ImGui::TextDisabled("Address: %s : %u", m_selectedPeer.ipAddress.c_str(), (unsigned)m_selectedPeer.port);
+                    }
                     ImGui::Spacing();
 
                     ImGui::Text("Secure Pairing PIN:");
@@ -863,11 +928,13 @@ private:
                         const char* res = tinyfd_selectFolderDialog("Select Destination Folder", "");
                         if (res) {
                             m_selectedPath = res;
-                            m_isFolderMode = true;
                         }
                     }
                     ImGui::SameLine();
-                    ImGui::Checkbox("Folder Sync Mode", &m_isFolderMode);
+                    ImGui::Checkbox("Expect Folder Sync", &m_isFolderMode);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Check this if the Sender is sending a complete Folder.\nLeave unchecked if the Sender is sending a Single File.");
+                    }
                     ImGui::TextWrapped("Destination Path: %s", m_selectedPath.empty() ? "(None selected)" : m_selectedPath.c_str());
                     ImGui::Spacing();
 
@@ -950,7 +1017,11 @@ private:
                 ImGui::TextWrapped("%s", stats.statusMessage.c_str());
                 ImGui::Spacing();
 
-                if (stats.state == TransferWorker::State::Transferring) {
+                if (stats.inPreTransfer) {
+                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.2f, 1.0f), "Processing: %s", stats.preTransferPhase.c_str());
+                    float p = stats.preTransferTotal > 0 ? static_cast<float>(stats.preTransferProcessed) / static_cast<float>(stats.preTransferTotal) : 0.0f;
+                    ImGui::ProgressBar(p, ImVec2(-1.0f, 24.0f));
+                } else if (stats.state == TransferWorker::State::Transferring) {
                     float progress = 0.0f;
                     if (stats.totalBytes > 0) {
                         progress = static_cast<float>(stats.bytesTransferred) / static_cast<float>(stats.totalBytes);
@@ -1119,6 +1190,10 @@ private:
 };
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    extern int tinyfd_winUtf8;
+    tinyfd_winUtf8 = 1;
+#endif
     GuiApp app;
     if (!app.init()) {
         std::cerr << "Failed to initialize GUI application.\n";

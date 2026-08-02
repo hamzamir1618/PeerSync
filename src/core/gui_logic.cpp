@@ -90,12 +90,12 @@ bool detectJournalForPath(
     if (path.empty()) return false;
 
     std::error_code ec;
-    std::filesystem::path p(path);
+    std::filesystem::path basePath = std::filesystem::u8path(path);
 
     try {
         if (!isFolder) {
-            std::filesystem::path jPath = path + ".peersync-journal";
-            std::filesystem::path tPath = path + ".peersync-tmp";
+            std::filesystem::path jPath = std::filesystem::u8path(path); jPath += ".peersync-journal";
+            std::filesystem::path tPath = std::filesystem::u8path(path); tPath += ".peersync-tmp";
             if (std::filesystem::exists(jPath, ec) && std::filesystem::exists(tPath, ec)) {
                 uint64_t ba = 0, es = 0;
                 if (parseJournalFile(jPath, ba, es)) {
@@ -105,20 +105,20 @@ bool detectJournalForPath(
                 }
             }
         } else {
-            if (!std::filesystem::exists(p, ec) || !std::filesystem::is_directory(p, ec)) {
+            if (!std::filesystem::is_directory(basePath, ec)) {
                 return false;
             }
             uint64_t totalBa = 0;
             uint64_t totalEs = 0;
             bool foundAny = false;
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(p, ec)) {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(basePath, ec)) {
                 if (ec) break;
-                std::string pathStr = entry.path().string();
-                const std::string jExt = ".peersync-journal";
-                if (pathStr.length() >= jExt.length() && pathStr.compare(pathStr.length() - jExt.length(), jExt.length(), jExt) == 0) {
-                    std::string baseStr = pathStr.substr(0, pathStr.length() - jExt.length());
-                    std::filesystem::path tPath = baseStr + ".peersync-tmp";
-                    if (std::filesystem::exists(tPath, ec)) {
+                std::string pathStr = entry.path().u8string();
+                std::string ext = entry.path().extension().u8string();
+                if (entry.is_regular_file() && ext == ".peersync-journal") {
+                    std::string baseStr = pathStr.substr(0, pathStr.length() - 17);
+                    std::filesystem::path tPath = std::filesystem::u8path(baseStr); tPath += ".peersync-tmp";
+                    if (std::filesystem::exists(tPath)) {
                         uint64_t ba = 0, es = 0;
                         if (parseJournalFile(entry.path(), ba, es)) {
                             totalBa += ba;

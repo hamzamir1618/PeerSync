@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 
 namespace peersync {
 
@@ -34,6 +35,10 @@ struct DeltaInstruction {
     }
 };
 
+// Testing instrumentation
+void resetAdler32CallCount();
+size_t getAdler32CallCount();
+
 // Computes an Adler-32 rolling weak checksum over a buffer of bytes
 uint32_t computeAdler32(const uint8_t* data, size_t len);
 
@@ -45,12 +50,15 @@ uint64_t computeXxHash64(const uint8_t* data, size_t len);
 
 // Reads the file in blockSize-sized chunks (last block may be shorter), computing for each block
 // an Adler-32 weak checksum and an xxHash64 strong hash.
-std::vector<BlockSignature> computeSignatures(const std::filesystem::path& file, size_t blockSize);
+std::vector<BlockSignature> computeSignatures(const std::filesystem::path& file, size_t blockSize, std::function<void(uint64_t processed, uint64_t total)> progressCb = nullptr);
 
-// Scans newFile using a rolling checksum against oldFileSignatures to produce delta instructions.
-std::vector<DeltaInstruction> computeDelta(const std::filesystem::path& newFile,
-                                           const std::vector<BlockSignature>& oldFileSignatures,
-                                           size_t blockSize);
+// Computes the delta between a new file and a list of signatures from an old file.
+// Emits instructions one-by-one via the onInstruction callback for O(1) memory usage.
+void computeDelta(const std::filesystem::path& newFile,
+                  const std::vector<BlockSignature>& oldFileSignatures,
+                  size_t blockSize,
+                  std::function<void(DeltaInstruction)> onInstruction,
+                  std::function<void(uint64_t processed, uint64_t total)> progressCb = nullptr);
 
 // Reconstructs target file by applying instructions against oldFile and writing to outputFile atomically.
 void reconstructFile(const std::filesystem::path& oldFile,

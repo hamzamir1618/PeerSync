@@ -652,3 +652,123 @@ TEST_F(TransferTest, MonotonicJournalMultiFile) {
     ASSERT_TRUE(senderSuccess);
     ASSERT_TRUE(receiverSuccess) << "Receiver error: " << receiverError;
 }
+
+TEST_F(TransferTest, ResumableSyncMidwayInterruption) {
+    std::filesystem::path targetFile = receiverDir / "resume_mid.dat";
+    createTestFile(targetFile, 50000, 42); 
+
+    auto senderBytes = readFileBytes(targetFile);
+    for (size_t i = 32; i < senderBytes.size(); i += 128) {
+        senderBytes[i] ^= 0xFF; 
+    }
+    std::filesystem::path senderFile = senderDir / "sender_resume_mid.dat";
+    {
+        std::ofstream ofs(senderFile, std::ios::binary);
+        ofs.write(reinterpret_cast<const char*>(senderBytes.data()), static_cast<std::streamsize>(senderBytes.size()));
+    }
+    auto contentBytes = readFileBytes(senderFile);
+
+    peersync::TcpSocket server = peersync::TcpSocket::listen(0, "127.0.0.1");
+    uint16_t port = server.getBoundPort();
+
+    peersync::TcpSocket acceptedSocket;
+    std::thread acceptThread([&]() {
+        acceptedSocket = server.accept();
+    });
+    peersync::TcpSocket client = peersync::TcpSocket::connect("127.0.0.1", port);
+    if (acceptThread.joinable()) {
+        acceptThread.join();
+    }
+
+    peersync::TransferSession::Config config;
+    config.blockSize = 64; 
+    config.maxInstructionsPerMessage = 10;
+    config.literalThreshold = 10000; 
+
+    bool caughtException = false;
+    std::thread receiverThread([&]() {
+        try {
+            peersync::TransferSession session(acceptedSocket, config);
+            session.receiveFile(receiverDir);
+        } catch (const std::exception&) {
+            caughtException = true;
+        }
+    });
+
+    // Manually act as sender for 150 batches of 1 instruction each.
+    // The journal flushes exactly every 100 batches.
+    {
+        peersync::ManifestRequestMessage reqMsg{"resume_mid.dat"};
+        peersync::sendFramedMessage(client, peersync::serializeMessage(reqMsg));
+
+        auto respPayload = peersync::recvFramedMessage(client);
+        auto respMsg = peersync::deserializeManifestResponseMessage(respPayload);
+
+        std::vector<peersync::DeltaInstruction> delta;
+        peersync::computeDelta(senderFile, respMsg.signatures, config.blockSize, [&](const peersync::DeltaInstruction& inst) {
+            delta.push_back(inst);
+        });
+        ASSERT_GT(delta.size(), 200u);
+
+        for (size_t i = 0; i < 150; i++) {
+            std::vector<peersync::DeltaInstruction> singleBatch;
+            singleBatch.push_back(delta[i]);
+            peersync::DeltaInstructionsMessage deltaMsg{"resume_mid.dat", static_cast<uint64_t>(contentBytes.size()), static_cast<uint32_t>(config.blockSize), 1, singleBatch};
+            peersync::sendFramedMessage(client, peersync::serializeMessage(deltaMsg));
+
+            auto ackPayload = peersync::recvFramedMessage(client);
+            EXPECT_EQ(peersync::getMessageType(ackPayload), peersync::MessageType::TransferAck);
+        }
+
+        // We sent 150 batches. The receiver journal flushed at 100, but not for the last 50.
+        // Close client socket to simulate disconnection mid-way between flush points.
+        client.close();
+    }
+
+    if (receiverThread.joinable()) {
+        receiverThread.join();
+    }
+    EXPECT_TRUE(caughtException);
+
+    std::filesystem::path tempPath = receiverDir / "resume_mid.dat.peersync-tmp";
+    std::filesystem::path journalPath = receiverDir / "resume_mid.dat.peersync-journal";
+    EXPECT_TRUE(std::filesystem::exists(tempPath));
+    EXPECT_TRUE(std::filesystem::exists(journalPath));
+    
+    // Part 2: Reconnect and resume the transfer
+    peersync::TcpSocket server2 = peersync::TcpSocket::listen(0, "127.0.0.1");
+    uint16_t port2 = server2.getBoundPort();
+
+    peersync::TcpSocket acceptedSocket2;
+    std::thread acceptThread2([&]() {
+        acceptedSocket2 = server2.accept();
+    });
+    peersync::TcpSocket client2 = peersync::TcpSocket::connect("127.0.0.1", port2);
+    if (acceptThread2.joinable()) {
+        acceptThread2.join();
+    }
+
+    bool receiverSuccess = false;
+    std::thread receiverThread2([&]() {
+        try {
+            peersync::TransferSession session(acceptedSocket2, config);
+            receiverSuccess = session.receiveFile(receiverDir);
+        } catch (...) {
+            receiverSuccess = false;
+        }
+    });
+
+    peersync::TransferSession senderSession(client2, config);
+    bool senderSuccess = senderSession.sendFile(senderFile, "resume_mid.dat");
+
+    if (receiverThread2.joinable()) {
+        receiverThread2.join();
+    }
+
+    EXPECT_TRUE(senderSuccess);
+    EXPECT_TRUE(receiverSuccess);
+
+    // Assert that the file is byte-for-byte perfectly identical despite 
+    // the receiver having idempotently re-applied 50 batches of instructions.
+    EXPECT_EQ(readFileBytes(targetFile), contentBytes);
+}

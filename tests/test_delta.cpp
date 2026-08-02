@@ -404,3 +404,57 @@ TEST_F(DeltaTest, ReconstructFileFailureMidwayLeavesOriginalUntouched) {
         EXPECT_EQ(fname.find(".tmp."), std::string::npos) << "Found leftover temp file: " << fname;
     }
 }
+
+TEST_F(DeltaTest, ChunkBoundaryTruncationBugRegression_FastPath) {
+    size_t blockSize = 64 * 1024;
+    size_t chunkSize = 4 * 1024 * 1024;
+    std::vector<size_t> testSizes = { chunkSize - 1, chunkSize, chunkSize + 1 };
+
+    for (size_t size : testSizes) {
+        std::vector<uint8_t> newData(size, 'A');
+        fs::path newPath = createTempFile("new_file_" + std::to_string(size), newData);
+        fs::path oldPath = createTempFile("old_file_empty_" + std::to_string(size), {});
+
+        // Fast path: no signatures
+        auto sigs = peersync::computeSignatures(oldPath, blockSize);
+        EXPECT_TRUE(sigs.empty());
+
+        auto delta = computeDeltaVector(newPath, sigs, blockSize);
+        
+        fs::path reconPath = testDir_ / ("recon_fast_" + std::to_string(size));
+        peersync::reconstructFile(oldPath, delta, reconPath, blockSize);
+
+        EXPECT_EQ(fs::file_size(reconPath), size) << "Truncation detected on fast path for size " << size;
+        auto reconData = readFileBytes(reconPath);
+        EXPECT_EQ(reconData, newData);
+    }
+}
+
+TEST_F(DeltaTest, ChunkBoundaryTruncationBugRegression_SlowPath) {
+    size_t blockSize = 64 * 1024;
+    size_t chunkSize = 4 * 1024 * 1024;
+    std::vector<size_t> testSizes = { chunkSize - 1, chunkSize, chunkSize + 1 };
+
+    for (size_t size : testSizes) {
+        std::vector<uint8_t> oldData(size, 'B');
+        std::vector<uint8_t> newData = oldData;
+        // Modify first byte to ensure it's not a trivial exact match at the start
+        if (!newData.empty()) newData[0] = 'C';
+        
+        fs::path oldPath = createTempFile("old_file_" + std::to_string(size), oldData);
+        fs::path newPath = createTempFile("new_file_" + std::to_string(size), newData);
+
+        // Slow path: signatures present
+        auto sigs = peersync::computeSignatures(oldPath, blockSize);
+        EXPECT_FALSE(sigs.empty());
+
+        auto delta = computeDeltaVector(newPath, sigs, blockSize);
+        
+        fs::path reconPath = testDir_ / ("recon_slow_" + std::to_string(size));
+        peersync::reconstructFile(oldPath, delta, reconPath, blockSize);
+
+        EXPECT_EQ(fs::file_size(reconPath), size) << "Truncation detected on slow path for size " << size;
+        auto reconData = readFileBytes(reconPath);
+        EXPECT_EQ(reconData, newData);
+    }
+}

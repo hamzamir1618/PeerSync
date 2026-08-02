@@ -220,7 +220,11 @@ The benchmarks evaluate both the local in-memory delta processing pipeline (`com
 | **Bandwidth Equivalent %** | **0.625%** of full size | **0.625%** of full size |
 | **Net Bandwidth Savings** | **99.37%** | **99.37%** |
 
-#### 2. Loopback Socket Streaming (`TransferSession`, 250 MB & 1 GB synthetic files)
+#### 2. End-to-End Live Transfer (3.13 GB Dataset)
+- **Original Baseline**: Never completed (failed or hung due to memory scaling, socket buffer sizes, and delta engine bugs).
+- **Final Optimized Baseline**: **~28–31 seconds** (end-to-end throughput of > 100 MB/s on a loopback gigabit equivalent link, capped primarily by disk write speed and cryptographic hashing).
+
+#### 3. Loopback Socket Streaming (`TransferSession`, 250 MB & 1 GB synthetic files)
 | Metric | 250 MB Dataset | 1 GB (1000 MB) Dataset |
 | :--- | :--- | :--- |
 | **Wall-Clock Transfer Time** | ~9.28 s | ~57.5 s |

@@ -314,6 +314,7 @@ std::vector<uint8_t> serializeMessage(const DeltaInstructionsMessage& msg) {
     writeString(buf, msg.relativePath);
     writeU64(buf, msg.targetFileSize);
     writeU32(buf, msg.blockSize);
+    writeU64(buf, msg.batchSeq);
     writeU32(buf, static_cast<uint32_t>(msg.instructions.size()));
     for (const auto& inst : msg.instructions) {
         writeU8(buf, static_cast<uint8_t>(inst.type));
@@ -334,6 +335,7 @@ DeltaInstructionsMessage deserializeDeltaInstructionsMessage(const std::vector<u
     msg.relativePath = reader.readString();
     msg.targetFileSize = reader.readU64();
     msg.blockSize = reader.readU32();
+    msg.batchSeq = reader.readU64();
     uint32_t count = reader.readU32();
     reader.validateCount(count, 9);
     msg.instructions.reserve(count);
@@ -383,6 +385,7 @@ std::vector<uint8_t> serializeMessage(const TransferAckMessage& msg) {
     writeU8(buf, static_cast<uint8_t>(MessageType::TransferAck));
     writeString(buf, msg.relativePath);
     writeU64(buf, msg.bytesReceived);
+    writeU64(buf, msg.batchSeq);
     return buf;
 }
 
@@ -392,6 +395,7 @@ TransferAckMessage deserializeTransferAckMessage(const std::vector<uint8_t>& pay
     TransferAckMessage msg;
     msg.relativePath = reader.readString();
     msg.bytesReceived = reader.readU64();
+    msg.batchSeq = reader.readU64();
     reader.expectEOF();
     return msg;
 }

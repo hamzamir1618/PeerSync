@@ -9,8 +9,8 @@
   using os_socket_t = SOCKET;
   static constexpr os_socket_t OS_INVALID_SOCKET = INVALID_SOCKET;
 #else
-  #include <sys/socket.h>
   #include <netinet/in.h>
+  #include <netinet/tcp.h>
   #include <arpa/inet.h>
   #include <netdb.h>
   #include <unistd.h>
@@ -111,6 +111,22 @@ TcpSocket& TcpSocket::operator=(TcpSocket&& other) noexcept {
     return *this;
 }
 
+void TcpSocket::getBufferSize(int& sndbuf, int& rcvbuf) const {
+    sndbuf = 0;
+    rcvbuf = 0;
+    if (m_handle == invalid_handle) return;
+    int len = sizeof(int);
+    ::getsockopt(static_cast<os_socket_t>(m_handle), SOL_SOCKET, SO_SNDBUF, (char*)&sndbuf, &len);
+    len = sizeof(int);
+    ::getsockopt(static_cast<os_socket_t>(m_handle), SOL_SOCKET, SO_RCVBUF, (char*)&rcvbuf, &len);
+}
+
+void TcpSocket::setBufferSize(int size) {
+    if (m_handle == invalid_handle) return;
+    ::setsockopt(static_cast<os_socket_t>(m_handle), SOL_SOCKET, SO_SNDBUF, (char*)&size, sizeof(int));
+    ::setsockopt(static_cast<os_socket_t>(m_handle), SOL_SOCKET, SO_RCVBUF, (char*)&size, sizeof(int));
+}
+
 void TcpSocket::close() noexcept {
     if (m_handle != invalid_handle) {
         closeSocketHandle(static_cast<os_socket_t>(m_handle));
@@ -157,7 +173,9 @@ TcpSocket TcpSocket::listen(uint16_t port, const std::string& bindAddr) {
         throwNetworkError("listen", err);
     }
 
-    return TcpSocket(static_cast<handle_type>(sock));
+    TcpSocket tcpSock(static_cast<handle_type>(sock));
+    tcpSock.setNoDelay(true);
+    return tcpSock;
 }
 
 struct AddrInfoDeleter {
@@ -256,8 +274,9 @@ TcpSocket TcpSocket::connect(const std::string& host, uint16_t port, int timeout
 #endif
 
     TcpSocket resSocket(static_cast<handle_type>(sock));
-    resSocket.setRecvTimeout(60000);
-    resSocket.setSendTimeout(60000);
+    resSocket.setRecvTimeout(3600000);
+    resSocket.setSendTimeout(3600000);
+    resSocket.setNoDelay(true);
     return resSocket;
 }
 
@@ -272,8 +291,9 @@ TcpSocket TcpSocket::accept() {
         throwNetworkError("accept");
     }
     TcpSocket clientSocket(static_cast<handle_type>(clientSock));
-    clientSocket.setRecvTimeout(60000);
-    clientSocket.setSendTimeout(60000);
+    clientSocket.setRecvTimeout(3600000);
+    clientSocket.setSendTimeout(3600000);
+    clientSocket.setNoDelay(true);
     return clientSocket;
 }
 
@@ -377,22 +397,41 @@ void TcpSocket::setRecvTimeout(int timeoutMs) {
 }
 
 void TcpSocket::setSendTimeout(int timeoutMs) {
-    if (m_handle == invalid_handle) {
-        throw PeerSyncNetworkException("setSendTimeout called on invalid socket");
-    }
+    if (m_handle == invalid_handle) return;
 #ifdef _WIN32
-    DWORD timeout = static_cast<DWORD>(timeoutMs);
-    if (::setsockopt(static_cast<SOCKET>(m_handle), SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout)) != 0) {
-        throwNetworkError("setsockopt(SO_SNDTIMEO)");
-    }
+    DWORD tv = timeoutMs;
+    setsockopt((os_socket_t)m_handle, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
 #else
-    struct timeval tv{};
+    struct timeval tv;
     tv.tv_sec = timeoutMs / 1000;
     tv.tv_usec = (timeoutMs % 1000) * 1000;
-    if (::setsockopt(static_cast<int>(m_handle), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0) {
-        throwNetworkError("setsockopt(SO_SNDTIMEO)");
-    }
+    setsockopt((os_socket_t)m_handle, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
 #endif
 }
+
+void TcpSocket::setNoDelay(bool enable) {
+    if (m_handle == invalid_handle) return;
+    int flag = enable ? 1 : 0;
+#ifdef _WIN32
+    setsockopt((os_socket_t)m_handle, IPPROTO_TCP, TCP_NODELAY, (const char*)&flag, sizeof(flag));
+#else
+    setsockopt((os_socket_t)m_handle, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+#endif
+}
+
+bool TcpSocket::getNoDelay() const {
+    if (m_handle == invalid_handle) return false;
+    int flag = 0;
+#ifdef _WIN32
+    int optlen = sizeof(flag);
+    getsockopt((os_socket_t)m_handle, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, &optlen);
+#else
+    socklen_t optlen = sizeof(flag);
+    getsockopt((os_socket_t)m_handle, IPPROTO_TCP, TCP_NODELAY, &flag, &optlen);
+#endif
+    return flag != 0;
+}
+
+
 
 } // namespace peersync

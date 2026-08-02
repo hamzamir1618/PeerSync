@@ -17,10 +17,18 @@ public:
     struct Config {
         size_t blockSize = 1024;                // Block size for delta signatures and chunking
         size_t literalThreshold = 1024;         // Send literal bytes > threshold as BlockData messages
-        size_t maxInstructionsPerMessage = 500; // Max instructions in a single DeltaInstructions message
+        uint32_t windowSize = 8;
         bool allowResume = true;                // Whether automatic transfer resumption is permitted
+        
+        uint32_t maxInstructionsPerMessage = 500;
+        uint32_t ackDelayMs = 0; // For testing memory boundedness under slow ack conditions
         std::function<void(uint64_t bytesSent, uint64_t fileBytesProcessed, uint64_t totalFileSize)> progressCallback = nullptr;
-        std::function<void(const std::string& relPath, bool isResuming, uint64_t resumedBytes, uint64_t totalFileSize)> onResumeDetected = nullptr;
+        std::function<void(const std::string& currentOperation, uint64_t processed, uint64_t total)> preTransferProgressCallback = nullptr;
+        std::function<void(const std::string& path, bool isResuming, uint64_t bytesApplied, uint64_t expectedSize)> onResumeDetected = nullptr;
+        std::function<void(const std::string& path, uint64_t bytesApplied, uint64_t lastSeq)> testJournalCallback = nullptr;
+        
+        // For testing/instrumentation
+        std::function<void(size_t instructionCount, size_t literalBytes)> preBatchSendCallback = nullptr;
         std::function<bool()> isCancelled = nullptr; // Returns true if transfer should be aborted immediately
     };
 
@@ -40,7 +48,7 @@ public:
     std::string getFinalHash() const { return m_finalHash; }
 
     // Computes hex-encoded xxHash64 of a file
-    static std::string computeFileHash(const std::filesystem::path& file);
+    static std::string computeFileHash(const std::filesystem::path& file, std::function<void(uint64_t processed, uint64_t total)> progressCb = nullptr);
 
 private:
     void sendMsg(const std::vector<uint8_t>& payload);

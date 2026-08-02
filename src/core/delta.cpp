@@ -252,13 +252,6 @@ void computeDelta(const std::filesystem::path& newFile,
     if (!pendingLiteral.empty()) {
         onInstruction(DeltaInstruction::Literal(std::move(pendingLiteral)));
     }
-
-    auto deltaEndTime = std::chrono::steady_clock::now();
-    std::chrono::duration<double> elapsedDelta = deltaEndTime - deltaStartTime;
-    std::cerr << "\n[INSTRUMENTATION] computeDelta: Finished in " << elapsedDelta.count() << " seconds.\n";
-    std::cerr << "[INSTRUMENTATION] computeDelta: Rolling checksum match count = " << matchCount << "\n";
-    std::cerr << "[INSTRUMENTATION] computeDelta: Fast path taken = " << (fastPathTaken ? "YES" : "NO") << "\n";
-    std::cerr << "[INSTRUMENTATION] computeDelta: Rolling checksum computations = " << rollingChecksumComputations << "\n";
 }
 
 void reconstructFile(const std::filesystem::path& oldFile,

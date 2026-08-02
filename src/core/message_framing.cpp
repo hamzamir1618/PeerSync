@@ -1,6 +1,14 @@
 #include <peersync/message_framing.h>
 #include <peersync/exceptions.h>
 #include <string>
+#include <cstring>
+#include <chrono>
+#include <atomic>
+#include <vector>
+
+extern std::atomic<int> g_metricsCount;
+extern std::vector<int> g_t_recv_syscall_count;
+extern std::vector<double> g_t_recv_syscall_avg;
 
 namespace peersync {
 
@@ -14,16 +22,17 @@ void sendFramedMessage(TcpSocket& sock, const uint8_t* data, size_t len) {
     }
 
     uint32_t netLen = static_cast<uint32_t>(len);
-    uint8_t prefix[4];
-    prefix[0] = static_cast<uint8_t>((netLen >> 24) & 0xFF);
-    prefix[1] = static_cast<uint8_t>((netLen >> 16) & 0xFF);
-    prefix[2] = static_cast<uint8_t>((netLen >> 8) & 0xFF);
-    prefix[3] = static_cast<uint8_t>(netLen & 0xFF);
+    std::vector<uint8_t> buffer(len + 4);
+    buffer[0] = static_cast<uint8_t>((netLen >> 24) & 0xFF);
+    buffer[1] = static_cast<uint8_t>((netLen >> 16) & 0xFF);
+    buffer[2] = static_cast<uint8_t>((netLen >> 8) & 0xFF);
+    buffer[3] = static_cast<uint8_t>(netLen & 0xFF);
 
-    sock.send(prefix, 4);
     if (len > 0) {
-        sock.send(data, len);
+        std::memcpy(buffer.data() + 4, data, len);
     }
+    
+    sock.send(buffer.data(), buffer.size());
 }
 
 void sendFramedMessage(TcpSocket& sock, const std::vector<uint8_t>& payload) {
@@ -36,8 +45,14 @@ static void recvExactly(TcpSocket& sock, uint8_t* buffer, size_t exactLen, const
         throw PeerSyncNetworkException("recvExactly: null buffer with non-zero exactLen");
     }
     size_t totalReceived = 0;
+    int localRecvCount = 0;
+    double localRecvTime = 0.0;
     while (totalReceived < exactLen) {
+        auto t0 = std::chrono::high_resolution_clock::now();
         size_t recvd = sock.recv(buffer + totalReceived, exactLen - totalReceived);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        localRecvCount++;
+        localRecvTime += std::chrono::duration<double, std::milli>(t1 - t0).count();
 
         if (recvd == 0) {
             if (totalReceived > 0) {
@@ -49,6 +64,14 @@ static void recvExactly(TcpSocket& sock, uint8_t* buffer, size_t exactLen, const
             }
         }
         totalReceived += recvd;
+    }
+
+    if (stage == "payload" && exactLen > 100000) {
+        int batch = g_metricsCount.load();
+        if (batch < 20) {
+            g_t_recv_syscall_count[batch] = localRecvCount;
+            g_t_recv_syscall_avg[batch] = localRecvTime / localRecvCount;
+        }
     }
 }
 

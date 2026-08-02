@@ -38,7 +38,7 @@ std::vector<FileEntry> SyncOrchestrator::buildManifest(const std::filesystem::pa
         const auto& entry = *it;
         if (entry.is_directory(ec)) continue;
 
-        std::string filename = entry.path().filename().string();
+        std::string filename = entry.path().filename().u8string();
         if (filename.find(".peersync-tmp") != std::string::npos ||
             filename.find(".peersync-journal") != std::string::npos) {
             continue;
@@ -47,7 +47,7 @@ std::vector<FileEntry> SyncOrchestrator::buildManifest(const std::filesystem::pa
         auto relPath = std::filesystem::relative(entry.path(), localDir, ec);
         if (ec) continue;
 
-        std::string relStr = relPath.generic_string(); // Forward slashes
+        std::string relStr = relPath.generic_u8string(); // Forward slashes
         uint64_t size = entry.file_size(ec);
         if (ec) size = 0;
 
@@ -250,7 +250,7 @@ bool SyncOrchestrator::executeSync(const std::filesystem::path& localDir, const 
             }
             bool res = false;
             if (task.isSending) {
-                res = session.sendFile(localDir / task.relativePath, task.relativePath);
+                res = session.sendFile(localDir / std::filesystem::u8path(task.relativePath), task.relativePath);
                 if (res) m_filesSent++;
             } else {
                 res = session.receiveFile(localDir);
@@ -291,7 +291,7 @@ bool SyncOrchestrator::executeSync(const std::filesystem::path& localDir, const 
                     }
                     bool res = false;
                     if (task.isSending) {
-                        res = session.sendFile(localDir / task.relativePath, task.relativePath);
+                        res = session.sendFile(localDir / std::filesystem::u8path(task.relativePath), task.relativePath);
                         if (res) m_filesSent++;
                     } else {
                         res = session.receiveFile(localDir);

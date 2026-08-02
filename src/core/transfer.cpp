@@ -150,12 +150,7 @@ std::vector<uint8_t> TransferSession::recvMsg() {
 }
 
 bool TransferSession::sendFile(const std::filesystem::path& localFile, const std::string& relativePath) {
-    int sndbuf = 0, rcvbuf = 0;
-    m_socket.getBufferSize(sndbuf, rcvbuf);
-    std::cout << "\n[SOCKET] Sender OS Buffer (Before): SO_SNDBUF=" << sndbuf << ", SO_RCVBUF=" << rcvbuf << "\n";
-    m_socket.setBufferSize(8 * 1024 * 1024);
-    m_socket.getBufferSize(sndbuf, rcvbuf);
-    std::cout << "[SOCKET] Sender OS Buffer (After): SO_SNDBUF=" << sndbuf << ", SO_RCVBUF=" << rcvbuf << "\n";
+    m_socket.setBufferSize(8388608);
 
     if (m_config.isCancelled && m_config.isCancelled()) {
         throw PeerSyncProtocolException("Transfer cancelled by user");
@@ -394,14 +389,8 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
 }
 
 bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
-    int sndbuf = 0, rcvbuf = 0;
-    m_socket.getBufferSize(sndbuf, rcvbuf);
-    std::cout << "\n[SOCKET] Receiver OS Buffer (Before): SO_SNDBUF=" << sndbuf << ", SO_RCVBUF=" << rcvbuf << "\n";
     m_socket.setBufferSize(8 * 1024 * 1024);
-    m_socket.getBufferSize(sndbuf, rcvbuf);
-    std::cout << "[SOCKET] Receiver OS Buffer (After): SO_SNDBUF=" << sndbuf << ", SO_RCVBUF=" << rcvbuf << "\n";
 
-    double totalOfsWriteTime = 0.0;
     if (m_config.isCancelled && m_config.isCancelled()) {
         throw PeerSyncProtocolException("Transfer cancelled by user");
     }
@@ -536,6 +525,9 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
         journal.lastSeq = 0;
     }
 
+    auto lastJournalTime = std::chrono::steady_clock::now();
+    uint64_t batchesSinceLastJournal = 0;
+
     if (!isResuming || expectedFileSize == 0 || totalBytesApplied < expectedFileSize) {
         while (true) {
             if (m_config.isCancelled && m_config.isCancelled()) {
@@ -639,10 +631,21 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
 
                 journal.lastSeq = totalInstructionsApplied;
                 journal.bytesApplied = totalBytesApplied;
-                ofs.flush();
-                saveJournal(journalPath, journal);
+                
+                batchesSinceLastJournal++;
+                auto now = std::chrono::steady_clock::now();
+                if (batchesSinceLastJournal >= 100 || std::chrono::duration_cast<std::chrono::milliseconds>(now - lastJournalTime).count() >= 500) {
+                    ofs.flush();
+                    saveJournal(journalPath, journal);
+
+                    batchesSinceLastJournal = 0;
+                    lastJournalTime = now;
+                }
 
                 if (receivedAtLeastOneDeltaMsg && totalBytesApplied == expectedFileSize) {
+                    ofs.flush();
+                    saveJournal(journalPath, journal);
+                    
                     break;
                 }
             } else if (type == MessageType::ErrorMessage) {
@@ -667,6 +670,8 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
         throw PeerSyncProtocolException("Reconstructed file size mismatch");
     }
 
+    std::string finalHash = computeFileHash(tempPath);
+
     std::error_code renameEc;
     std::filesystem::rename(tempPath, targetFile, renameEc);
     if (renameEc) {
@@ -674,19 +679,18 @@ bool TransferSession::receiveFile(const std::filesystem::path& localDir) {
             std::error_code removeEc;
             std::filesystem::remove(targetFile, removeEc);
             if (!removeEc) {
-                renameEc.clear();
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 std::filesystem::rename(tempPath, targetFile, renameEc);
             }
         }
         if (renameEc) {
-            throw PeerSyncProtocolException("Failed to rename temp file over target file: " + renameEc.message());
+            throw PeerSyncProtocolException("Failed to rename temporary file to target file: " + renameEc.message());
         }
     }
 
     guard.commit = true;
     std::filesystem::remove(journalPath, ec);
 
-    std::string finalHash = computeFileHash(targetFile);
     TransferCompleteMessage compMsg{relativePath, true, finalHash};
     sendMsg(serializeMessage(compMsg));
 

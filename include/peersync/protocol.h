@@ -66,6 +66,7 @@ struct DeltaInstructionsMessage {
     std::string relativePath;
     uint64_t targetFileSize;
     uint32_t blockSize;
+    uint64_t batchSeq;
     std::vector<DeltaInstruction> instructions;
 };
 
@@ -78,6 +79,7 @@ struct BlockDataMessage {
 struct TransferAckMessage {
     std::string relativePath;
     uint64_t bytesReceived;
+    uint64_t batchSeq;
 };
 
 struct ResumeRequestMessage {
