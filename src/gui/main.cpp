@@ -522,6 +522,9 @@ private:
 
     peersync::PeerBrowser m_browser;
     TransferWorker m_worker;
+    ImFont* m_fontRegular = nullptr;
+    ImFont* m_fontTitle = nullptr;
+    ImFont* m_fontMetadata = nullptr;
 
     mutable std::mutex m_peersMutex;
     std::vector<peersync::DiscoveredPeer> m_cachedPeers;
