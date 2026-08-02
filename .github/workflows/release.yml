@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-release:
+    name: Build and Package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache FetchContent / _deps
+        uses: actions/cache@v4
+        with:
+          path: build-pkg/_deps
+          key: ${{ runner.os }}-pkg-deps-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pkg-deps-
+            ${{ runner.os }}-deps-
+
+      - name: Install Linux GUI Dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libxcursor-dev libxinerama-dev libxi-dev libxrandr-dev libxss-dev libx11-dev libwayland-dev libxkbcommon-dev
+
+      - name: Configure CMake
+        run: >
+          cmake -S . -B build-pkg
+          -DCMAKE_BUILD_TYPE=Release
+          -DPEERSYNC_BUILD_TESTS=OFF
+          -DPEERSYNC_BUILD_GUI=ON
+
+      - name: Build Project
+        run: cmake --build build-pkg --config Release
+
+      - name: Run CPack
+        working-directory: build-pkg
+        run: cpack -C Release
+
+      - name: Upload Package Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.os }}
+          path: |
+            build-pkg/peersync-*.tar.gz
+            build-pkg/peersync-*.zip
+            build-pkg/peersync-*.tgz
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/package-ubuntu-latest/*
+            artifacts/package-macos-latest/*
+            artifacts/package-windows-latest/*
+          generate_release_notes: true
