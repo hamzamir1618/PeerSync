@@ -66,6 +66,3 @@ else()
 endif()
 
 include(CPack)
-
-add_executable(test_cancel test_cancel.cpp)
-target_link_libraries(test_cancel PRIVATE peersync_core)
