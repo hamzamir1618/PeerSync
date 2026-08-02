@@ -353,7 +353,7 @@ bool TransferSession::sendFile(const std::filesystem::path& localFile, const std
         ackCv.wait(lock, [&]() { return inFlight == 0 || ackThreadError; });
     }
 
-    ackThreadRunning = false;
+    // Wait for the ack thread to naturally exit after receiving TransferComplete or ErrorMessage
     if (ackThread.joinable()) {
         ackThread.join();
     }
