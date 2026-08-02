@@ -215,6 +215,13 @@ private:
             }
 
             updateState(State::Transferring, "Pairing successful! Starting transfer...");
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_stats.inPreTransfer = true;
+                m_stats.preTransferPhase = "Pairing successful, preparing transfer...";
+                m_stats.preTransferProcessed = 0;
+                m_stats.preTransferTotal = 0;
+            }
             executeTransfer(client, peersync::SyncOrchestrator::Role::Initiator, isDir, path, true, allowResume);
         } catch (const std::exception& e) {
             if (!m_cancelRequested.load()) {
@@ -281,6 +288,13 @@ private:
             }
 
             updateState(State::Transferring, "Pairing successful! Receiving transfer...");
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_stats.inPreTransfer = true;
+                m_stats.preTransferPhase = "Pairing successful, preparing transfer...";
+                m_stats.preTransferProcessed = 0;
+                m_stats.preTransferTotal = 0;
+            }
             executeTransfer(client, peersync::SyncOrchestrator::Role::Responder, isDir, path, false, allowResume);
         } catch (const std::exception& e) {
             if (!m_cancelRequested.load()) {
