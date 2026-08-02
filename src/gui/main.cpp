@@ -621,27 +621,7 @@ public:
 
             
 
-            static bool screenshot_taken = false;
-            static float accumTime = 0.0f;
-            accumTime += ImGui::GetIO().DeltaTime;
-            if (!screenshot_taken && accumTime > 1.5f) {
-                screenshot_taken = true;
-                int w, h;
-                glfwGetFramebufferSize(m_window, &w, &h);
-                unsigned char* pixels = new unsigned char[3 * w * h];
-                glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels);
-                unsigned char* flipped = new unsigned char[3 * w * h];
-                for(int y = 0; y < h; y++) {
-                    memcpy(flipped + (h - 1 - y) * w * 3, pixels + y * w * 3, w * 3);
-                }
-                stbi_write_png("verification_screenshot.png", w, h, 3, flipped, w * 3);
-                delete[] pixels;
-                delete[] flipped;
-                glfwSwapBuffers(m_window);
-            } else {
-                glfwSwapBuffers(m_window);
-            }
+            glfwSwapBuffers(m_window);
         }
     }
 
